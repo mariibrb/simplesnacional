@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Foco: Cálculo Automático de Alíquotas PGDAS (13 Casas) e Base vNF Proporcional
+Foco: Persistência de Dados (Session State) e Automação de Alíquotas
 """
 
 import zipfile
@@ -29,8 +29,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ─── REGRAS FISCAIS UNIVERSAIS (ANEXO I - COMÉRCIO) ──────────────────────────
-# Tabelas conforme Lei Complementar 123/2006
+# ─── REGRAS FISCAIS (ANEXO I - COMÉRCIO) ─────────────────────────────────────
 TABELAS_SIMPLES = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3400")),
@@ -85,18 +84,26 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 # ─── INTERFACE E MOTOR DE CÁLCULO ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Automação PGDAS (Anexo I)")
+    st.title("🛡️ Sentinela - Auditoria com Persistência de Dados")
     
+    # Inicialização do Session State para não perder dados ao atualizar
+    if 'cnpj_persist' not in st.session_state:
+        st.session_state.cnpj_persist = "52.980.554/0001-04"
+    if 'rbt12_persist' not in st.session_state:
+        st.session_state.rbt12_persist = "504.403,47"
+
     with st.sidebar:
         st.header("👤 Cliente")
-        cnpj_cli = limpar_cnpj(st.text_input("CNPJ", value="52.980.554/0001-04"))
+        cnpj_input = st.text_input("CNPJ", value=st.session_state.cnpj_persist, key="cnpj_val")
+        st.session_state.cnpj_persist = cnpj_input # Atualiza a persistência
+        cnpj_cli = limpar_cnpj(cnpj_input)
         
         st.header("⚙️ Receita Bruta")
-        rbt12_raw = st.text_input("Faturamento RBT12 (12 meses)", value="504.403,47")
+        rbt12_raw = st.text_input("Faturamento RBT12", value=st.session_state.rbt12_persist, key="rbt12_val")
+        st.session_state.rbt12_persist = rbt12_raw # Atualiza a persistência
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
 
-    # ─── MOTOR DE ALÍQUOTA AUTOMÁTICA (13 CASAS) ─────────────────────────────
-    # Busca a faixa correta na tabela do Simples
+    # ─── MOTOR DE ALÍQUOTA AUTOMÁTICA ────────────────────────────────────────
     aliq_nom, deducao, p_icms = Decimal("0.04"), Decimal("0"), Decimal("0.335")
     for num, ini, fim, nom, ded, perc_icms in TABELAS_SIMPLES:
         if rbt12 <= fim:
@@ -110,13 +117,9 @@ def main():
         aliq_efetiva = Decimal("0.04")
         aliq_st = aliq_efetiva
 
-    # Views para Dashboard
-    aliq_ef_view = aliq_efetiva.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
-    aliq_st_view = aliq_st.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
-
     files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"])
 
-    if st.button("🚀 Gerar Memorial Automático") and files:
+    if st.button("🚀 Gerar Memorial") and files:
         chaves_vistas, registros = set(), []
         for f in files:
             registros.extend(extrair_dados_xml(f.read(), chaves_vistas, cnpj_cli))
@@ -125,29 +128,24 @@ def main():
             df = pd.DataFrame(registros)
             df_saida = df[df["Tipo"] == "SAÍDA"].copy()
             
-            # Agrupamento para consolidar faturamento por CFOP
             resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor Cru': 'sum'}).reset_index()
             
             def aplicar_imposto(row):
-                # Arredonda a base para 2 casas antes da conta final conforme regra fiscal
                 base = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 aliq = aliq_st if row['ST'] else aliq_efetiva
                 return (base * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
             resumo['DAS'] = resumo.apply(aplicar_imposto, axis=1)
             resumo['Faturamento'] = resumo['Valor Cru'].apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
-            resumo['Aliq_View'] = resumo['ST'].apply(lambda x: f"{aliq_st_view*100:.13f}%" if x else f"{aliq_ef_view*100:.13f}%")
+            resumo['Aliq_View'] = resumo['ST'].apply(lambda x: f"{(aliq_st if x else aliq_efetiva)*100:.13f}%")
 
             st.markdown("### 📊 Dashboard Consolidado")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Faturamento Total", f"R$ {resumo['Faturamento'].sum():,.2f}")
+            c1.metric("Faturamento", f"R$ {resumo['Faturamento'].sum():,.2f}")
             c2.metric("DAS Total", f"R$ {resumo['DAS'].sum():,.2f}")
-            c3.metric("Alíquota Efetiva (Normal)", f"{aliq_ef_view*100:.4f}%")
+            c3.metric("Alíquota Normal", f"{aliq_efetiva.quantize(Decimal('0.0000000000000001'), ROUND_HALF_UP)*100:.4f}%")
 
-            st.markdown("### 📑 Resumo Analítico por CFOP")
             st.table(resumo[['CFOP', 'Faturamento', 'Aliq_View', 'DAS']])
-            
-            st.markdown("### 📋 Rastreabilidade")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
             st.error("Nenhuma nota encontrada.")
