@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão extrema para bater com o PGDAS (conforme memorial da Emir Mimessi)
+# Precisão extrema para bater com o PGDAS
 getcontext().prec = 30 
 
 # ─── ESTILO RIHANNA / MONTSERRAT ─────────────────────────────────────────────
@@ -20,17 +20,15 @@ st.markdown("""
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .memorial-box { background-color: white; padding: 25px; border-radius: 10px; border: 1px solid #d81b60; color: black; line-height: 1.6; }
-        .difal-box { background-color: #fff3f8; padding: 15px; border-radius: 10px; border-left: 5px solid #ff4081; margin-top: 10px; color: #4a0024; }
         .highlight { color: #d81b60; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
-# ─── REGRAS FISCAIS UNIVERSAIS (ANEXO I) ─────────────────────────────────────
+# ─── REGRAS FISCAIS UNIVERSAIS ───────────────────────────────────────────────
 TABELAS_SIMPLES = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3400")),
     (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.095"), Decimal("13860.00"), Decimal("0.3350")),
-    (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00"), Decimal("0.3350")),
 ]
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404"}
 CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411"}
@@ -38,100 +36,92 @@ CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411
 # ─── FUNÇÕES DE AUDITORIA ────────────────────────────────────────────────────
 
 def limpar_cnpj(cnpj):
-    """Garante que a comparação seja feita apenas entre números."""
     return re.sub(r'\D', '', str(cnpj))
 
-def identificar_cancelamento(conteudo):
+def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
+    regs = []
     try:
-        root = ET.fromstring(conteudo.lstrip())
-        for ev in root.iter():
-            if "tpEvento" in ev.tag and ev.text == "110111":
-                ch = root.find(".//{http://www.portalfiscal.inf.br/nfe}chNFe")
-                return ch.text if ch is not None else None
-    except: return None
-
-def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente, uf_cliente):
-    regs, difal_regs = [], []
-    try:
-        root = ET.fromstring(conteudo.lstrip())
+        # Tenta remover o cabeçalho do XML se houver lixo
+        xml_str = conteudo.decode('utf-8', errors='ignore')
+        xml_str = re.sub(r'^.*<\?xml', '<?xml', xml_str, flags=re.DOTALL)
+        root = ET.fromstring(xml_str.lstrip())
         ns = "{http://www.portalfiscal.inf.br/nfe}"
+        
+        # Procura infNFe em qualquer lugar do XML
         inf = root.find(f".//{ns}infNFe")
-        if inf is None: return [], []
+        if inf is None: return []
         
         chave = inf.attrib.get('Id', '')[3:]
-        if not chave or chave in chaves_vistas or chave in chaves_canc: return [], []
+        if not chave or chave in chaves_vistas: return []
         
-        emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
-        emit_uf = inf.find(f"{ns}enderEmit/{ns}UF").text
-        dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
-        dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
+        emit_node = inf.find(f"{ns}emit/{ns}CNPJ")
+        emit_cnpj = limpar_cnpj(emit_node.text) if emit_node is not None else ""
         
-        n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
-        tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
+        # Se o usuário digitou um CNPJ, filtramos. Se não, lê tudo.
+        if cnpj_cliente and emit_cnpj != cnpj_cliente:
+            return []
 
-        # Trava Dinâmica de CNPJ (Emitente para Saída, Destinatário para Entrada/DIFAL)
-        if emit_cnpj == cnpj_cliente and tipo_op == "1":
-            for det in inf.findall(f"{ns}det"):
-                v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
-                cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
-                csosn = det.find(f".//{ns}CSOSN")
-                is_st = (csosn is not None and csosn.text == "500") or cfop in CFOPS_ST
-                regs.append({"Nota": n_nota, "Tipo": "SAÍDA", "CFOP": cfop, "Valor": v_prod, "ST": is_st, "Chave": chave})
-            chaves_vistas.add(chave)
-        elif dest_cnpj == cnpj_cliente and tipo_op == "0":
-            for det in inf.findall(f"{ns}det"):
-                cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
-                v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
-                if cfop in CFOPS_DEVOLUCAO:
-                    regs.append({"Nota": n_nota, "Tipo": "DEVOLUÇÃO", "CFOP": cfop, "Valor": v_prod, "ST": False, "Chave": chave})
-                elif emit_uf != uf_cliente and cfop.startswith("2"):
-                    difal_regs.append({"Nota": n_nota, "Origem": emit_uf, "Valor Base": v_prod, "Chave": chave})
-            chaves_vistas.add(chave)
+        n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
+        tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text # 1=Saída, 0=Entrada
+
+        for det in inf.findall(f"{ns}det"):
+            v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
+            cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
+            csosn = det.find(f".//{ns}CSOSN")
+            
+            # Identifica se o item é ST (pelo CFOP ou CSOSN 500)
+            is_st = (csosn is not None and csosn.text == "500") or cfop in CFOPS_ST
+            
+            regs.append({
+                "Nota": n_nota,
+                "Tipo": "SAÍDA" if tipo_op == "1" else "DEVOLUÇÃO",
+                "CFOP": cfop,
+                "Valor": v_prod,
+                "ST": is_st,
+                "Chave": chave
+            })
+        chaves_vistas.add(chave)
     except: pass
-    return regs, difal_regs
+    return regs
 
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Universal")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria de Alta Precisão")
     
     with st.sidebar:
         st.header("👤 Cliente")
-        cnpj_input = st.text_input("CNPJ (Pode conter pontos/traços)", value="52.980.554/0001-04")
+        cnpj_input = st.text_input("CNPJ do Cliente (Opcional)", value="52.980.554/0001-04")
         cnpj_cli = limpar_cnpj(cnpj_input)
-        uf_cli = st.selectbox("UF do Cliente", ["SP", "RJ", "MG", "PR", "SC", "RS", "BA", "GO", "PB", "PE"])
         
         st.header("⚙️ PGDAS")
-        rbt12_raw = st.text_input("RBT12 Acumulado")
+        rbt12_raw = st.text_input("RBT12 Acumulado", value="504.403,47")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
 
     files = st.file_uploader("Upload XML ou ZIP", accept_multiple_files=True, type=["xml", "zip"])
 
-    if st.button("🚀 Iniciar Auditoria") and cnpj_cli:
-        chaves_vistas, chaves_canc, bytes_list = set(), set(), []
+    if st.button("🚀 Iniciar Auditoria"):
+        chaves_vistas = set()
+        bytes_list = []
+        
         for f in files:
             content = f.read()
             if f.name.lower().endswith('.zip'):
                 with zipfile.ZipFile(io.BytesIO(content)) as z:
                     for n in z.namelist():
-                        c = z.read(n); canc = identificar_cancelamento(c)
-                        if canc: chaves_canc.add(canc)
-                        bytes_list.append(c)
+                        bytes_list.append(z.read(n))
             else:
-                canc = identificar_cancelamento(content); 
-                if canc: chaves_canc.add(canc)
                 bytes_list.append(content)
 
-        registros, lista_difal = [], []
+        registros = []
         for b in bytes_list:
-            r, d = extrair_dados(b, chaves_vistas, chaves_canc, cnpj_cli, uf_cli)
-            registros.extend(r); lista_difal.extend(d)
+            registros.extend(extrair_dados_xml(b, chaves_vistas, cnpj_cli))
         
         if registros:
             df = pd.DataFrame(registros)
             
-            # Cálculo de Alíquotas com Precisão de 13 casas
-            aliq_nom, ded, f_n, p_icms = Decimal("0.04"), Decimal("0"), 1, Decimal("0.335")
+            # Cálculo Alíquota (Exatamente como o PGDAS da Emir Mimessi)
+            aliq_nom, ded, f_n, p_icms = Decimal("0.095"), Decimal("13860.00"), 3, Decimal("0.335")
             for num, ini, fim, nom, d_val, p_val in TABELAS_SIMPLES:
                 if rbt12 <= fim:
                     f_n, aliq_nom, ded, p_icms = num, nom, d_val, p_val
@@ -141,41 +131,37 @@ def main():
             aliq_ef = aliq_ef.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             aliq_st = (aliq_ef * (Decimal("1.0") - p_icms)).quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             
-            fat_bruto_total = df[df['Tipo'] == "SAÍDA"]['Valor'].sum()
+            # Totalizadores
+            fat_bruto = df[df['Tipo'] == "SAÍDA"]['Valor'].sum()
             val_st_total = df[(df['Tipo'] == "SAÍDA") & (df['ST'] == True)]['Valor'].sum()
+            base_normal = fat_bruto - val_st_total
             
-            resumo_cfop = []
+            # Resumo CFOP
+            resumo = []
             for cfop in df['CFOP'].unique():
-                tipo = df[df['CFOP'] == cfop]['Tipo'].iloc[0]
-                is_st = df[df['CFOP'] == cfop]['ST'].any()
-                v_bruto = df[df['CFOP'] == cfop]['Valor'].sum()
+                sub = df[df['CFOP'] == cfop]
+                v = sub['Valor'].sum()
+                st_flag = sub['ST'].any()
+                tp = sub['Tipo'].iloc[0]
                 
-                # Subtração Real: Bruto - ST detectado para base normal
-                v_liq = v_bruto - val_st_total if (not is_st and tipo == "SAÍDA") else v_bruto
-                aliq = aliq_st if is_st else (Decimal("0") if tipo == "DEVOLUÇÃO" else aliq_ef)
-                imp = (v_liq * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                # Regra de Subtração
+                v_calc = (v - val_st_total) if (not st_flag and tp == "SAÍDA") else v
+                aliq = aliq_st if st_flag else (Decimal("0") if tp == "DEVOLUÇÃO" else aliq_ef)
+                imp = (v_calc * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
-                resumo_cfop.append({
-                    "CFOP": cfop, "Tipo": tipo, "ST": is_st, 
-                    "V. Bruto": v_bruto, "Base Líquida": v_liq, 
-                    "Alíquota": f"{aliq*100:.13f}%", "Imposto": imp
-                })
+                resumo.append({"CFOP": cfop, "Tipo": tp, "Valor Bruto": v, "Base Líquida": v_calc, "Alíquota": f"{aliq*100:.13f}%", "Imposto": imp})
 
-            st.markdown("### 📊 Dashboard")
+            st.markdown("### 📊 Dashboard de Auditoria")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Faturamento Bruto Real", f"R$ {fat_bruto_total:,.2f}")
-            c2.metric("Base Normal Líquida", f"R$ {fat_bruto_total - val_st_total:,.2f}")
-            c3.metric("Base ICMS ST", f"R$ {val_st_total:,.2f}")
-            c4.metric("DAS TOTAL", f"R$ {sum(r['Imposto'] for r in resumo_cfop):,.2f}")
+            c1.metric("Faturamento Total", f"R$ {fat_bruto:,.2f}")
+            c2.metric("Base Normal", f"R$ {base_normal:,.2f}")
+            c3.metric("Base ST", f"R$ {val_st_total:,.2f}")
+            c4.metric("DAS TOTAL", f"R$ {sum(r['Imposto'] for r in resumo):,.2f}")
 
-            if lista_difal:
-                st.markdown(f'<div class="difal-box">⚠️ **DIFAL Detectado:** R$ {pd.DataFrame(lista_difal)["Valor Base"].sum():,.2f}</div>', unsafe_allow_html=True)
-
-            st.markdown("### 📝 Memorial por CFOP")
-            st.table(pd.DataFrame(resumo_cfop))
-            st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
+            st.table(pd.DataFrame(resumo))
+            st.dataframe(df.sort_values("Nota"), use_container_width=True)
         else:
-            st.error(f"❌ Nenhuma nota encontrada para o CNPJ {cnpj_cli}. Verifique se as notas pertencem a este CNPJ.")
+            st.error("Nenhuma nota processada. Verifique o CNPJ ou a integridade dos XMLs.")
 
 if __name__ == "__main__":
     main()
