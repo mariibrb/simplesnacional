@@ -5,6 +5,8 @@ Autor: Script gerado conforme especificação fiscal para escritório contábil
 Execução: streamlit run app.py
 """
 
+import pdfplumber
+import re
 import os
 import csv
 import zipfile
