@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Foco: Persistência de Dados (Session State) e Automação de Alíquotas
+Foco: Persistência Dinâmica (Sem valores de exemplo fixos)
 """
 
 import zipfile
@@ -84,24 +84,29 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 # ─── INTERFACE E MOTOR DE CÁLCULO ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria com Persistência de Dados")
+    st.title("🛡️ Sentinela - Auditoria com Persistência Dinâmica")
     
-    # Inicialização do Session State para não perder dados ao atualizar
+    # Session State inicializado VAZIO para não prender exemplos
     if 'cnpj_persist' not in st.session_state:
-        st.session_state.cnpj_persist = "52.980.554/0001-04"
+        st.session_state.cnpj_persist = ""
     if 'rbt12_persist' not in st.session_state:
-        st.session_state.rbt12_persist = "504.403,47"
+        st.session_state.rbt12_persist = ""
 
     with st.sidebar:
         st.header("👤 Cliente")
-        cnpj_input = st.text_input("CNPJ", value=st.session_state.cnpj_persist, key="cnpj_val")
-        st.session_state.cnpj_persist = cnpj_input # Atualiza a persistência
+        cnpj_input = st.text_input("CNPJ do Cliente", value=st.session_state.cnpj_persist, placeholder="00.000.000/0000-00")
+        st.session_state.cnpj_persist = cnpj_input 
         cnpj_cli = limpar_cnpj(cnpj_input)
         
         st.header("⚙️ Receita Bruta")
-        rbt12_raw = st.text_input("Faturamento RBT12", value=st.session_state.rbt12_persist, key="rbt12_val")
-        st.session_state.rbt12_persist = rbt12_raw # Atualiza a persistência
-        rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
+        rbt12_raw = st.text_input("Faturamento RBT12", value=st.session_state.rbt12_persist, placeholder="Ex: 500000,00")
+        st.session_state.rbt12_persist = rbt12_raw 
+        
+        try:
+            rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
+        except:
+            rbt12 = Decimal("0")
+            st.warning("Verifique o formato do RBT12.")
 
     # ─── MOTOR DE ALÍQUOTA AUTOMÁTICA ────────────────────────────────────────
     aliq_nom, deducao, p_icms = Decimal("0.04"), Decimal("0"), Decimal("0.335")
@@ -141,14 +146,14 @@ def main():
 
             st.markdown("### 📊 Dashboard Consolidado")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Faturamento", f"R$ {resumo['Faturamento'].sum():,.2f}")
+            c1.metric("Faturamento Total", f"R$ {resumo['Faturamento'].sum():,.2f}")
             c2.metric("DAS Total", f"R$ {resumo['DAS'].sum():,.2f}")
-            c3.metric("Alíquota Normal", f"{aliq_efetiva.quantize(Decimal('0.0000000000000001'), ROUND_HALF_UP)*100:.4f}%")
+            c3.metric("Alíquota Efetiva (Normal)", f"{(aliq_efetiva.quantize(Decimal('0.0000000000000001'), ROUND_HALF_UP)*100):.4f}%")
 
             st.table(resumo[['CFOP', 'Faturamento', 'Aliq_View', 'DAS']])
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.error("Nenhuma nota encontrada.")
+            st.error("Nenhuma nota encontrada para o CNPJ informado.")
 
 if __name__ == "__main__":
     main()
