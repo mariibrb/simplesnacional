@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão extrema para bater com o PGDAS (conforme PDF da Emir Mimessi)
+# Precisão extrema para bater com o PGDAS (Hierarquia fiscal respeitada)
 getcontext().prec = 30 
 
 # ─── ESTILO RIHANNA / MONTSERRAT ─────────────────────────────────────────────
@@ -23,7 +23,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ─── REGRAS FISCAIS UNIVERSAIS (ANEXO I) ─────────────────────────────────────
+# ─── REGRAS FISCAIS UNIVERSAIS (ANEXO I - COMÉRCIO) ──────────────────────────
 TABELAS_SIMPLES = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3400")),
@@ -33,9 +33,10 @@ TABELAS_SIMPLES = [
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404"}
 CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411"}
 
-# ─── FUNÇÕES DE AUDITORIA ────────────────────────────────────────────────────
+# ─── FUNÇÕES DE AUDITORIA E PROCESSAMENTO ────────────────────────────────────
 
 def identificar_cancelamento(conteudo):
+    """Detecta eventos de cancelamento para expurgar notas da base."""
     try:
         root = ET.fromstring(conteudo.lstrip())
         for ev in root.iter():
@@ -45,6 +46,7 @@ def identificar_cancelamento(conteudo):
     except: return None
 
 def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente, uf_cliente):
+    """Extrai faturamento, devoluções e DIFAL com trava de CNPJ."""
     regs, difal_regs = [], []
     try:
         root = ET.fromstring(conteudo.lstrip())
@@ -82,15 +84,18 @@ def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente, uf_cliente
     except: pass
     return regs, difal_regs
 
-# ─── INTERFACE ───────────────────────────────────────────────────────────────
+# ─── INTERFACE STREAMLIT ─────────────────────────────────────────────────────
 
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria Universal e Memorial")
     
     with st.sidebar:
-        cnpj_input = st.text_input("CNPJ do Cliente (somente números)")
+        st.header("👤 Parâmetros da Empresa")
+        cnpj_input = st.text_input("CNPJ do Cliente (Auditoria Atual)")
         cnpj_cli = "".join(filter(str.isdigit, cnpj_input))
         uf_cli = st.selectbox("UF do Cliente", ["SP", "RJ", "MG", "PR", "SC", "RS", "BA", "GO", "PB", "PE"])
+        
+        st.header("⚙️ Configurações PGDAS")
         rbt12_raw = st.text_input("RBT12 Acumulado (Ex: 504403.47)")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
 
@@ -119,7 +124,7 @@ def main():
         if registros:
             df = pd.DataFrame(registros)
             
-            # Cálculo de Alíquotas (13 casas decimais conforme PGDAS)
+            # Cálculo de Alíquotas (Precisão de 13 casas decimais conforme solicitado)
             aliq_nom, ded, f_n, p_icms = Decimal("0.04"), Decimal("0"), 1, Decimal("0.335")
             for num, ini, fim, nom, d_val, p_val in TABELAS_SIMPLES:
                 if rbt12 <= fim:
@@ -130,56 +135,56 @@ def main():
             aliq_ef = aliq_ef.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             aliq_st = (aliq_ef * (Decimal("1.0") - p_icms)).quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             
-            # Totais do Lote
+            # Totais Brutos e Deduções
             fat_bruto_total = df[df['Tipo'] == "SAÍDA"]['Valor'].sum()
             val_st_total = df[df['ST'] == True]['Valor'].sum()
-            dev_total = df[df['Tipo'] == "DEVOLUÇÃO"]['Valor'].sum()
             
-            # Agrupamento para Memorial por CFOP
+            # Resumo por CFOP com Subtração de Base Real
             resumo_cfop = []
             for cfop in df['CFOP'].unique():
                 tipo = df[df['CFOP'] == cfop]['Tipo'].iloc[0]
-                is_st = cfop in CFOPS_ST
+                is_st = df[df['CFOP'] == cfop]['ST'].iloc[0]
                 v_bruto = df[df['CFOP'] == cfop]['Valor'].sum()
                 
-                # Regra de Subtração de Base ST da Base Normal
+                # Subtração Real: Abate ST da base normal se for saída
                 v_liq = v_bruto - val_st_total if (not is_st and tipo == "SAÍDA") else v_bruto
                 aliq = aliq_st if is_st else (Decimal("0") if tipo == "DEVOLUÇÃO" else aliq_ef)
                 imp = (v_liq * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
                 resumo_cfop.append({
                     "CFOP": cfop, "Tipo": tipo, "ST": is_st, 
-                    "Valor Bruto": v_bruto, "Base Líquida": v_liq, 
+                    "V. Bruto": v_bruto, "Base Líquida": v_liq, 
                     "Alíquota": f"{aliq*100:.13f}%", "Imposto": imp
                 })
 
-            # DASHBOARD
-            st.markdown("### 📊 Dashboard de Conferência")
+            # ─── DASHBOARD ───────────────────────────────────────────────────
+            st.markdown("### 📊 Dashboard de Auditoria")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Faturamento Bruto (vNF)", f"R$ {fat_bruto_total:,.2f}")
             c2.metric("Base Normal Líquida", f"R$ {fat_bruto_total - val_st_total:,.2f}")
-            c3.metric("Base ST", f"R$ {val_st_total:,.2f}")
-            c4.metric("DAS TOTAL", f"R$ {sum(r['Imposto'] for r in resumo_cfop):,.2f}")
+            c3.metric("Base ICMS ST", f"R$ {val_st_total:,.2f}")
+            c4.metric("DAS TOTAL APURADO", f"R$ {sum(r['Imposto'] for r in resumo_cfop):,.2f}")
 
-            # MEMORIAL DETALHADO
-            st.markdown("### 📝 Memorial de Cálculo por CFOP")
+            # ─── MEMORIAL DETALHADO ──────────────────────────────────────────
+            st.markdown("### 📝 Memorial de Cálculo (Resumo por CFOP)")
             st.markdown(f"""
             <div class="memorial-box">
-                <b>RESUMO DO FATURAMENTO (EMPRESA: {cnpj_cli}):</b><br>
-                • Faturamento Bruto Total (vNF): <b>R$ {fat_bruto_total:,.2f}</b><br>
-                • Alíquota PGDAS: {aliq_ef*100:.13f}% | Alíquota ST: {aliq_st*100:.13f}%<br>
-                • <small>Subtração de Base: O valor de R$ {val_st_total:,.2f} foi deduzido da base normal para tributação em separado.</small>
+                <b>RESUMO ANALÍTICO (CNPJ: {cnpj_cli}):</b><br>
+                • Nota Inicial/Final: {df['Nota'].min()} até {df['Nota'].max()}<br>
+                • Alíquota Efetiva PGDAS: <span class="highlight">{aliq_ef*100:.13f}%</span><br>
+                • Alíquota ST (Dedução {p_icms*100}%): <b>{aliq_st*100:.13f}%</b><br>
+                • <small>Lógica: O valor de ST foi subtraído do faturamento total para apuração da base normal.</small>
             </div>
             """, unsafe_allow_html=True)
             
-            st.table(pd.DataFrame(resumo_cfop)[['CFOP', 'Tipo', 'ST', 'Valor Bruto', 'Base Líquida', 'Alíquota', 'Imposto']])
+            st.table(pd.DataFrame(resumo_cfop)[['CFOP', 'Tipo', 'ST', 'V. Bruto', 'Base Líquida', 'Alíquota', 'Imposto']])
             
             if lista_difal:
-                st.info(f"⚠️ **DIFAL de Entrada:** Detectado R$ {pd.DataFrame(lista_difal)['Valor Base'].sum():,.2f} em notas interestaduais.")
+                st.info(f"⚠️ **DIFAL Detectado:** R$ {pd.DataFrame(lista_difal)['Valor Base'].sum():,.2f} em compras interestaduais.")
 
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.warning("Nenhuma nota autorizada para este CNPJ foi encontrada.")
+            st.error(f"❌ Nenhuma nota autorizada para o CNPJ {cnpj_cli} foi encontrada nos arquivos enviados.")
 
 if __name__ == "__main__":
     main()
