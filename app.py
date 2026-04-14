@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Ajuste Absoluto: Cálculo do DAS sobre o montante consolidado por CFOP.
+Ajuste Definitivo: Controle manual de alíquotas para bater com PGDAS.
 """
 
 import zipfile
@@ -11,7 +11,6 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão total para garantir que a soma dos proporcionais seja idêntica ao vNF total
 getcontext().prec = 60 
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
@@ -30,7 +29,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── REGRAS FISCAIS ──────────────────────────────────────────────────────────
-PERC_ICMS_ANEXO_I = Decimal("0.34")
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404"}
 
 def limpar_cnpj(cnpj):
@@ -65,7 +63,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 
         for item in itens_nota:
             proporcao = item['valor'] / v_prod_total_nota if v_prod_total_nota > 0 else Decimal("0")
-            # Valor cru para soma sem perda de decimais
             regs.append({
                 "Nota": n_nota, "Tipo": "SAÍDA" if tipo_op == "1" else "ENTRADA",
                 "CFOP": item['cfop'], "ST": item['cfop'] in CFOPS_ST,
@@ -76,22 +73,31 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     return regs
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria Côncava (Consolidada)")
+    st.title("🛡️ Sentinela - Auditoria com Controle de Alíquota")
     
     with st.sidebar:
+        st.header("👤 Cliente")
         cnpj_cli = limpar_cnpj(st.text_input("CNPJ", value="52.980.554/0001-04"))
-        rbt12_raw = st.text_input("RBT12", value="504.403,47")
+        
+        st.header("⚙️ Cálculo das Alíquotas")
+        rbt12_raw = st.text_input("RBT12 (Para sugerir alíquota)", value="504.403,47")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
-        is_st_toggle = st.toggle("Dedução ICMS ST (34%)", value=True)
+        
+        # Sugestão de cálculo automático
+        aliq_nom_sug, ded_sug = Decimal("0.073"), Decimal("5940.00")
+        aliq_ef_sug = ((rbt12 * aliq_nom_sug) - ded_sug) / rbt12 if rbt12 > 0 else Decimal("0.04")
+        
+        st.markdown("---")
+        # CAMPOS MANUAIS: Aqui você coloca o que quiser para bater com o PGDAS
+        aliq_manual_input = st.text_input("Alíquota Efetiva Manual (%)", value=f"{aliq_ef_sug*100:.13f}")
+        aliq_st_manual_input = st.text_input("Alíquota ST Manual (%)", value=f"{(aliq_ef_sug * Decimal('0.66'))*100:.13f}")
 
-    # Alíquotas com 13 casas decimais
-    aliq_nom, deducao = Decimal("0.073"), Decimal("5940.00")
-    aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else Decimal("0.04")
-    aliq_st = aliq_efetiva * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
+        aliq_efetiva = Decimal(aliq_manual_input.replace(",", ".")) / 100
+        aliq_st = Decimal(aliq_st_manual_input.replace(",", ".")) / 100
 
     files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"])
 
-    if st.button("🚀 Gerar Memorial Absoluto") and files:
+    if st.button("🚀 Gerar Memorial") and files:
         chaves_vistas, registros = set(), []
         for f in files:
             registros.extend(extrair_dados_xml(f.read(), chaves_vistas, cnpj_cli))
@@ -100,30 +106,25 @@ def main():
             df = pd.DataFrame(registros)
             df_saida = df[df["Tipo"] == "SAÍDA"].copy()
             
-            # ─── LÓGICA DE CÁLCULO CONSOLIDADO ──────────────────────────────────
-            # Primeiro agrupamos para ter o faturamento total por CFOP com precisão
+            # Agrupamento Consolidado para evitar erro de centavos
             resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor Cru': 'sum'}).reset_index()
             
-            # Agora aplicamos a alíquota sobre o TOTAL de cada CFOP (Como o PGDAS faz)
-            def calcular_das_grupo(row):
+            def aplicar_imposto(row):
                 base = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
-                aliq = aliq_st if is_st_toggle and row['ST'] else aliq_efetiva
+                aliq = aliq_st if row['ST'] else aliq_efetiva
                 return (base * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
-            resumo['DAS'] = resumo.apply(calcular_das_grupo, axis=1)
+            resumo['DAS'] = resumo.apply(aplicar_imposto, axis=1)
             resumo['Faturamento'] = resumo['Valor Cru'].apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
-            resumo['Aliq_View'] = resumo['ST'].apply(lambda x: f"{(aliq_st if is_st_toggle and x else aliq_efetiva)*100:.13f}%")
+            resumo['Aliq_View'] = resumo['ST'].apply(lambda x: f"{aliq_st*100:.13f}%" if x else f"{aliq_efetiva*100:.13f}%")
 
-            st.markdown("### 📊 Dashboard Consolidado")
+            st.markdown("### 📊 Dashboard")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Faturamento Total", f"R$ {resumo['Faturamento'].sum():,.2f}")
+            c1.metric("Faturamento", f"R$ {resumo['Faturamento'].sum():,.2f}")
             c2.metric("DAS Total", f"R$ {resumo['DAS'].sum():,.2f}")
-            c3.metric("Alíquota Efetiva", f"{aliq_efetiva*100:.13f}%")
+            c3.metric("Alíquota Aplicada", f"{aliq_efetiva*100:.6f}%")
 
-            st.markdown("### 📑 Resumo Analítico por CFOP")
             st.table(resumo[['CFOP', 'Faturamento', 'Aliq_View', 'DAS']])
-            
-            st.markdown("### 📋 Rastreabilidade")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
             st.error("Notas não encontradas.")
