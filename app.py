@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Rastreabilidade
-Foco: Conciliação de Valores (vProd vs vNF) e Agrupamento por Nota
+Sentinela Ecosystem - Auditoria Simples Nacional
+Foco: Base de Cálculo por vNF (Valor Total da Nota) e Rastreabilidade Analítica
 """
 
 import zipfile
@@ -19,11 +19,14 @@ st.markdown("""
         html, body, [class*="css"] { font-family: 'Montserrat', sans-serif; }
         .stApp { background: radial-gradient(circle at top center, #ffe6f0 0%, #ffb3d1 100%); color: #4a0024; }
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
-        .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
+        .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .faixa-box { background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #d81b60; margin-bottom: 10px; min-height: 100px; }
+        .faixa-ativa { background-color: #ffe6f0; border: 2px solid #d81b60; font-weight: bold; }
+        .memorial-box { background-color: white; padding: 20px; border-radius: 10px; border: 1px solid #d81b60; font-family: monospace; color: black; }
     </style>
 """, unsafe_allow_html=True)
 
-# ─── CONFIGURAÇÕES FISCAIS ───────────────────────────────────────────────────
+# ─── TABELAS OFICIAIS ────────────────────────────────────────────────────────
 
 TABELAS_SIMPLES = {
     "Anexo I (Comércio)": [
@@ -33,15 +36,23 @@ TABELAS_SIMPLES = {
         (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00")),
         (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.143"), Decimal("87300.00")),
         (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.19"), Decimal("256500.00")),
+    ],
+    "Anexo III (Serviços)": [
+        (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.06"), Decimal("0.00")),
+        (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.112"), Decimal("9360.00")),
+        (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.135"), Decimal("17640.00")),
+        (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.16"), Decimal("35640.00")),
+        (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.21"), Decimal("125640.00")),
+        (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.33"), Decimal("648000.00")),
     ]
 }
 
 CFOPS_RECEITA = {"5101", "5102", "5403", "5405", "6102", "6403", "6404"}
 CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411"}
 
-# ─── PROCESSAMENTO ANALÍTICO ─────────────────────────────────────────────────
+# ─── LÓGICA DE PROCESSAMENTO ─────────────────────────────────────────────────
 
-def extrair_dados_xml(conteudo, chaves_vistas):
+def extrair_dados_xml(conteudo, nome_arquivo, chaves_vistas):
     regs = []
     try:
         root = ET.fromstring(conteudo.lstrip())
@@ -54,76 +65,99 @@ def extrair_dados_xml(conteudo, chaves_vistas):
         
         n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
-        
-        # Valor Total da Nota (vNF) para conferência
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
+        
+        # Analisar CFOPs para decidir se a nota inteira entra na base
+        tem_receita = False
+        tem_devolucao = False
         
         for det in inf.findall(f"{ns}det"):
             cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
-            v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
-            
-            categoria = "OUTROS"
-            if tipo_op == "1" and cfop in CFOPS_RECEITA: categoria = "SAÍDA (RECEITA)"
-            elif tipo_op == "0" and cfop in CFOPS_DEVOLUCAO: categoria = "ENTRADA (DEVOLUÇÃO)"
+            if tipo_op == "1" and cfop in CFOPS_RECEITA: tem_receita = True
+            elif tipo_op == "0" and cfop in CFOPS_DEVOLUCAO: tem_devolucao = True
                 
-            regs.append({
-                "Nota": n_nota,
-                "CFOP": cfop,
-                "Tipo": categoria,
-                "Valor Itens (vProd)": v_prod,
-                "Valor Total Nota (vNF)": v_nf,
-                "Chave": chave
-            })
+        if tem_receita:
+            regs.append({"Nota": n_nota, "Tipo": "SAÍDA (RECEITA)", "Valor Base (vNF)": v_nf, "Chave": chave})
+        elif tem_devolucao:
+            regs.append({"Nota": n_nota, "Tipo": "ENTRADA (DEVOLUÇÃO)", "Valor Base (vNF)": v_nf, "Chave": chave})
+            
         chaves_vistas.add(chave)
     except: pass
     return regs
 
+def ceifador_zip(zip_bytes, chaves_vistas):
+    all_regs = []
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        for name in z.namelist():
+            content = z.read(name)
+            if name.lower().endswith('.zip'): all_regs.extend(ceifador_zip(content, chaves_vistas))
+            elif name.lower().endswith('.xml'): all_regs.extend(extrair_dados_xml(content, name, chaves_vistas))
+    return all_regs
+
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Conciliação de Faturamento")
+    st.title("🛡️ Sentinela - Auditoria por Valor Total (vNF)")
     
     with st.sidebar:
-        rbt12_input = st.text_input("RBT12", value="0,00")
-        rbt12 = Decimal(rbt12_input.replace(".", "").replace(",", "."))
-        nome_anexo = "Anexo I (Comércio)" # Fixo para o exemplo
+        st.header("1. Parâmetros PGDAS")
+        rbt12_input = st.text_input("RBT12 (Página 1)", value="0,00")
+        try:
+            rbt12 = Decimal(rbt12_input.replace(".", "").replace(",", "."))
+        except: rbt12 = Decimal("0.00")
         
+        nome_anexo = st.selectbox("Anexo Principal", options=list(TABELAS_SIMPLES.keys()))
+        
+        # Cálculo da Alíquota
         aliq_efetiva = Decimal("0.00")
+        faixa_ativa_num = 1
         for num, inicio, fim, aliq_nom, deducao in TABELAS_SIMPLES[nome_anexo]:
             if rbt12 <= fim:
+                faixa_ativa_num = num
                 aliq_efetiva = (((rbt12 * aliq_nom) - deducao) / rbt12) if rbt12 > 0 else aliq_nom
                 break
+        
+        aliq_efetiva = max(aliq_efetiva, Decimal("0.00")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
         st.metric("Alíquota Efetiva", f"{(aliq_efetiva * 100):.4f} %")
 
-    files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"])
+    st.subheader("2. Arquivos do Mês")
+    files = st.file_uploader("Upload XML ou ZIP", accept_multiple_files=True, type=["xml", "zip"])
 
-    if st.button("🚀 Auditar") and files:
+    if st.button("🚀 Iniciar Auditoria") and files:
         chaves_vistas = set()
-        bruto_regs = []
+        registros = []
         for f in files:
-            bruto_regs.extend(extrair_dados_xml(f.read(), chaves_vistas))
+            content = f.read()
+            if f.name.lower().endswith('.zip'): registros.extend(ceifador_zip(content, chaves_vistas))
+            else: registros.extend(extrair_dados_xml(content, f.name, chaves_vistas))
         
-        if bruto_regs:
-            df = pd.DataFrame(bruto_regs)
-            
-            # AGRUPAMENTO PARA CONCILIAÇÃO: Uma linha por Nota/CFOP
-            df_conciliado = df.groupby(["Nota", "Chave", "Tipo", "Valor Total Nota (vNF)"]).agg({
-                "Valor Itens (vProd)": "sum"
-            }).reset_index()
+        if not registros:
+            st.error("Nenhuma nota fiscal de faturamento encontrada.")
+            return
 
-            # Cálculos Finais
-            saidas = df_conciliado[df_conciliado["Tipo"] == "SAÍDA (RECEITA)"]["Valor Itens (vProd)"].sum()
-            devolucoes = df_conciliado[df_conciliado["Tipo"] == "ENTRADA (DEVOLUÇÃO)"]["Valor Itens (vProd)"].sum()
-            base_liq = max(saidas - devolucoes, Decimal("0.00"))
-            
-            # DASHBOARD
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total vProd (Receita)", f"R$ {saidas:,.2f}")
-            c2.metric("Total vNF (Notas)", f"R$ {df_conciliado[df_conciliado['Tipo'] == 'SAÍDA (RECEITA)']['Valor Total Nota (vNF)'].sum():,.2f}")
-            c3.metric("Diferença vNF vs vProd", f"R$ {(df_conciliado[df_conciliado['Tipo'] == 'SAÍDA (RECEITA)']['Valor Total Nota (vNF)'].sum() - saidas):,.2f}")
+        df = pd.DataFrame(registros)
+        saidas = df[df["Tipo"] == "SAÍDA (RECEITA)"]["Valor Base (vNF)"].sum()
+        devolucoes = df[df["Tipo"] == "ENTRADA (DEVOLUÇÃO)"]["Valor Base (vNF)"].sum()
+        base_liq = max(saidas - devolucoes, Decimal("0.00"))
+        imposto = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-            st.markdown("### 📋 Tabela de Conferência (Agrupada por Nota)")
-            st.dataframe(df_conciliado.sort_values("Nota"), use_container_width=True, hide_index=True)
+        # Dashboard de Notas
+        nota_min, nota_max = df["Nota"].min(), df["Nota"].max()
+
+        st.markdown("### 📊 Resultado da Auditoria (Base vNF)")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Faixa de Notas", f"{nota_min} a {nota_max}")
+        c2.metric("Faturamento (vNF)", f"R$ {saidas:,.2f}")
+        c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
+        c4.metric("IMPOSTO CALCULADO", f"R$ {imposto:,.2f}")
+
+        # Memorial
+        st.markdown("### 📝 Memorial de Cálculo")
+        mem = f"Base Líquida (vNF): R$ {base_liq:,.2f} | Alíquota: {aliq_efetiva*100}% | Total DAS: R$ {imposto:,.2f}"
+        st.markdown(f'<div class="memorial-box">{mem}</div>', unsafe_allow_html=True)
+
+        st.markdown("### 📋 Rastreabilidade das Notas")
+        st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
