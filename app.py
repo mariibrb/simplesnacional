@@ -186,4 +186,18 @@ def main():
                 <b>CRUZAMENTO DE BASES (FAIXA {f_n}):</b><br>
                 • Alíquota PGDAS: <span class="highlight">{aliq_ef*100:.13f}%</span><br>
                 • Alíquota ST (Dedução {p_icms*100}%): <b>{aliq_st*100:.13f}%</b><br>
-                • <small>Lógica de Subtração: O valor de R$ {val_st_total:,.2f} (
+                • <small>Lógica de Subtração: O valor de R$ {val_st_total:,.2f} (ST) foi abatido do faturamento bruto para evitar bitributação.</small>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Tabela de CFOPs com valores formatados
+            df_display = pd.DataFrame(resumo_cfop)
+            st.table(df_display[['CFOP', 'Tipo', 'ST', 'Valor Bruto', 'Base Líquida', 'Alíquota Aplicada', 'Imposto']])
+            
+            st.markdown("### 📋 Rastreabilidade nota a nota")
+            st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
+        else:
+            st.warning("⚠️ Nenhuma nota encontrada para este CNPJ.")
+
+if __name__ == "__main__":
+    main()
