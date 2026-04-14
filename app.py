@@ -1,3 +1,8 @@
+"""
+Sentinela Ecosystem - Auditoria Simples Nacional
+Foco: Detecção de duplicidade e Memorial de Cálculo Analítico
+"""
+
 import os
 import csv
 import zipfile
@@ -19,11 +24,11 @@ st.markdown("""
         .stApp { background: radial-gradient(circle at top center, #ffe6f0 0%, #ffb3d1 100%); color: #4a0024; }
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
-        .memorial-box { background-color: white; padding: 20px; border-radius: 10px; border: 1px solid #d81b60; font-family: monospace; }
+        .memorial-box { background-color: white; padding: 20px; border-radius: 10px; border: 1px solid #d81b60; font-family: monospace; color: black; }
     </style>
 """, unsafe_allow_html=True)
 
-# ─── TABELAS E REGRAS FISCAIS ────────────────────────────────────────────────
+# ─── TABELAS E REGRAS FISCAIS (ANEXOS I E III) ──────────────────────────────
 
 TABELAS_SIMPLES = {
     "Anexo I (Comércio)": [
@@ -51,7 +56,7 @@ CFOPS_RECEITA_BRUTA = {
 }
 CFOPS_DEVOLUCAO_ENTRADA = {"1201", "1202", "1203", "1204", "2201", "2202"}
 
-# ─── LÓGICA DE AUDITORIA ─────────────────────────────────────────────────────
+# ─── LÓGICA DE AUDITORIA COM TRAVA DE DUPLICIDADE ────────────────────────────
 
 def calcular_aliquota_efetiva(rbt12, nome_anexo):
     tabela = TABELAS_SIMPLES[nome_anexo]
@@ -62,37 +67,55 @@ def calcular_aliquota_efetiva(rbt12, nome_anexo):
             return aliq_efetiva.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP), aliq_nom, deducao
     return tabela[-1][1], tabela[-1][1], tabela[-1][2]
 
-def processar_xml_bytes(conteudo, nome_arquivo):
+def processar_xml_bytes(conteudo, nome_arquivo, chaves_processadas):
     registros = []
     try:
         root = ET.fromstring(conteudo.lstrip())
         ns = "{http://www.portalfiscal.inf.br/nfe}"
         inf = root.find(f".//{ns}infNFe")
         if inf is None: return []
+        
+        # Identificação da Chave (Trava de Duplicidade)
+        chave = inf.attrib.get('Id', '')[3:]
+        if not chave or chave in chaves_processadas:
+            return [] # Ignora se já foi processada
+        
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
         for det in inf.findall(f"{ns}det"):
             cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
             v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
+            
             val_rec = v_prod if (tipo_op == "1" and cfop in CFOPS_RECEITA_BRUTA) else Decimal("0.00")
             val_dev = v_prod if (tipo_op == "0" and cfop in CFOPS_DEVOLUCAO_ENTRADA) else Decimal("0.00")
+            
             if val_rec > 0 or val_dev > 0:
-                registros.append({"arquivo": nome_arquivo, "cfop": cfop, "receita": val_rec, "devolucao": val_dev})
+                registros.append({
+                    "arquivo": nome_arquivo, 
+                    "chave": chave, 
+                    "cfop": cfop, 
+                    "receita": val_rec, 
+                    "devolucao": val_dev
+                })
+        
+        chaves_processadas.add(chave) # Registra a chave como lida
     except: pass
     return registros
 
-def modulo_ceifador_zip(zip_bytes):
+def modulo_ceifador_zip(zip_bytes, chaves_processadas):
     all_regs = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
             content = z.read(name)
-            if name.lower().endswith('.zip'): all_regs.extend(modulo_ceifador_zip(content))
-            elif name.lower().endswith('.xml'): all_regs.extend(processar_xml_bytes(content, name))
+            if name.lower().endswith('.zip'): 
+                all_regs.extend(modulo_ceifador_zip(content, chaves_processadas))
+            elif name.lower().endswith('.xml'): 
+                all_regs.extend(processar_xml_bytes(content, name, chaves_processadas))
     return all_regs
 
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria com Memorial de Cálculo")
+    st.title("🛡️ Sentinela - Auditoria com Trava de Duplicidade")
     
     with st.sidebar:
         st.header("1. Parâmetros PGDAS")
@@ -106,49 +129,52 @@ def main():
         st.metric("Alíquota Efetiva", f"{(aliq_efetiva * 100):.4f} %")
 
     st.subheader("2. Upload de Documentos")
-    files = st.file_uploader("Arraste XMLs ou ZIPs", accept_multiple_files=True, type=["xml", "zip"])
+    files = st.file_uploader("Arraste XMLs ou ZIPs Matrioskas", accept_multiple_files=True, type=["xml", "zip"])
 
     if st.button("🚀 Executar Auditoria") and files:
+        chaves_processadas = set() # Conjunto para evitar duplicados
         all_data = []
+        
         for f in files:
             content = f.read()
-            if f.name.lower().endswith('.zip'): all_data.extend(modulo_ceifador_zip(content))
-            else: all_data.extend(processar_xml_bytes(content, f.name))
+            if f.name.lower().endswith('.zip'): 
+                all_data.extend(modulo_ceifador_zip(content, chaves_processadas))
+            else: 
+                all_data.extend(processar_xml_bytes(content, f.name, chaves_processadas))
         
         total_rec = sum(d['receita'] for d in all_data)
         total_dev = sum(d['devolucao'] for d in all_data)
         base_liq = max(total_rec - total_dev, Decimal("0.00"))
         imposto_sentinela = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        # MÉTRICAS PRINCIPAIS
+        # MÉTRICAS
         st.markdown("---")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Receita Bruta (XML)", f"R$ {total_rec:,.2f}")
-        c2.metric("Base Líquida", f"R$ {base_liq:,.2f}")
-        c3.metric("IMPOSTO APURADO", f"R$ {imposto_sentinela:,.2f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Notas Únicas", len(chaves_processadas))
+        c2.metric("Receita Bruta (XML)", f"R$ {total_rec:,.2f}")
+        c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
+        c4.metric("IMPOSTO APURADO", f"R$ {imposto_sentinela:,.2f}")
 
-        # MEMORIAL DE CÁLCULO DETALHADO
-        st.markdown("### 📝 Memorial de Cálculo da Auditoria")
-        memorial_text = f"""
-        **PASSO 1: Identificação da Alíquota (Regra PGDAS)**
-        - RBT12 Informado: R$ {rbt12:,.2f} [cite: 13]
-        - Tabela Utilizada: {nome_anexo}
-        - Alíquota Nominal da Faixa: {aliq_nom * 100}%
-        - Parcela a Deduzir: R$ {deducao:,.2f}
-        - Fórmula: ((RBT12 * Alíquota Nominal) - Dedução) / RBT12
-        - Cálculo: (({rbt12} * {aliq_nom}) - {deducao}) / {rbt12}
-        - **Alíquota Efetiva Final: {aliq_efetiva * 100}%**
+        # MEMORIAL DE CÁLCULO
+        st.markdown("### 📝 Memorial de Cálculo Detalhado")
+        memorial = f"""
+        **1. PARÂMETROS DA ALÍQUOTA (PGDAS)**
+        - RBT12: R$ {rbt12:,.2f}
+        - Alíquota Nominal: {aliq_nom * 100}% | Parcela a Deduzir: R$ {deducao:,.2f}
+        - Fórmula: ((RBT12 * Alíq. Nominal) - Dedução) / RBT12
+        - **Efetiva: {aliq_efetiva * 100}%**
 
-        **PASSO 2: Consolidação da Base de Cálculo (Notas XML)**
-        - (+) Total de Saídas (Receita Bruta): R$ {total_rec:,.2f}
-        - (-) Total de Entradas (Devoluções): R$ {total_dev:,.2f}
-        - **(=) Base de Cálculo Líquida: R$ {base_liq:,.2f}**
+        **2. LEITURA DE DOCUMENTOS (TRAVA ANTI-DUPLICIDADE ATIVA)**
+        - Documentos Únicos Processados: {len(chaves_processadas)}
+        - (+) Receita Bruta Total: R$ {total_rec:,.2f}
+        - (-) Devoluções de Venda: R$ {total_dev:,.2f}
+        - **(=) Base de Cálculo Final: R$ {base_liq:,.2f}**
 
-        **PASSO 3: Apuração Final**
-        - Base Líquida (R$ {base_liq:,.2f}) * Alíquota ({aliq_efetiva * 100}%)
-        - **VALOR TOTAL DO IMPOSTO: R$ {imposto_sentinela:,.2f}** [cite: 29]
+        **3. APURAÇÃO FINAL**
+        - Base Líquida (R$ {base_liq:,.2f}) x Alíquota ({aliq_efetiva * 100}%)
+        - **VALOR DAS CALCULADO: R$ {imposto_sentinela:,.2f}**
         """
-        st.markdown(f'<div class="memorial-box">{memorial_text}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="memorial-box">{memorial}</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
