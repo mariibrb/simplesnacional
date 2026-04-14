@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Ajuste Definitivo: Controle manual de alíquotas para bater com PGDAS.
+Ajuste de Alíquota Real: Foco em bater com o PGDAS (Juarez/Nascel)
 """
 
 import zipfile
@@ -11,6 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
+# Precisão extrema para bater com o PGDAS
 getcontext().prec = 60 
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
@@ -53,6 +54,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
 
+        # Proporcionalidade para manter o vNF intacto na segregação de CFOP
         itens_nota = []
         v_prod_total_nota = Decimal("0")
         for det in inf.findall(f"{ns}det"):
@@ -73,31 +75,30 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     return regs
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria com Controle de Alíquota")
+    st.title("🛡️ Sentinela - Auditoria com Alíquota Editável")
     
     with st.sidebar:
         st.header("👤 Cliente")
         cnpj_cli = limpar_cnpj(st.text_input("CNPJ", value="52.980.554/0001-04"))
         
-        st.header("⚙️ Cálculo das Alíquotas")
-        rbt12_raw = st.text_input("RBT12 (Para sugerir alíquota)", value="504.403,47")
-        rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
+        st.header("⚙️ Configuração de Alíquotas")
+        st.caption("Ajuste aqui para bater com o PGDAS")
         
-        # Sugestão de cálculo automático
-        aliq_nom_sug, ded_sug = Decimal("0.073"), Decimal("5940.00")
-        aliq_ef_sug = ((rbt12 * aliq_nom_sug) - ded_sug) / rbt12 if rbt12 > 0 else Decimal("0.04")
-        
-        st.markdown("---")
-        # CAMPOS MANUAIS: Aqui você coloca o que quiser para bater com o PGDAS
-        aliq_manual_input = st.text_input("Alíquota Efetiva Manual (%)", value=f"{aliq_ef_sug*100:.13f}")
-        aliq_st_manual_input = st.text_input("Alíquota ST Manual (%)", value=f"{(aliq_ef_sug * Decimal('0.66'))*100:.13f}")
+        # Inputs Manuais de Alíquota (Em % como no PGDAS)
+        aliq_ef_manual = st.text_input("Alíquota Efetiva Normal (%)", value="6.7522285896211")
+        aliq_st_manual = st.text_input("Alíquota ICMS ST (%)", value="4.4564708691500")
 
-        aliq_efetiva = Decimal(aliq_manual_input.replace(",", ".")) / 100
-        aliq_st = Decimal(aliq_st_manual_input.replace(",", ".")) / 100
+        try:
+            aliq_efetiva = Decimal(aliq_ef_manual.replace(",", ".")) / 100
+            aliq_st = Decimal(aliq_st_manual.replace(",", ".")) / 100
+        except:
+            st.error("Erro no formato da alíquota. Use pontos.")
+            aliq_efetiva = Decimal("0")
+            aliq_st = Decimal("0")
 
     files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"])
 
-    if st.button("🚀 Gerar Memorial") and files:
+    if st.button("🚀 Gerar Memorial Analítico") and files:
         chaves_vistas, registros = set(), []
         for f in files:
             registros.extend(extrair_dados_xml(f.read(), chaves_vistas, cnpj_cli))
@@ -106,10 +107,11 @@ def main():
             df = pd.DataFrame(registros)
             df_saida = df[df["Tipo"] == "SAÍDA"].copy()
             
-            # Agrupamento Consolidado para evitar erro de centavos
+            # Agrupamento para consolidar faturamento por CFOP
             resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor Cru': 'sum'}).reset_index()
             
             def aplicar_imposto(row):
+                # Arredonda a base para 2 casas antes da conta final conforme regra fiscal
                 base = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 aliq = aliq_st if row['ST'] else aliq_efetiva
                 return (base * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
@@ -118,16 +120,19 @@ def main():
             resumo['Faturamento'] = resumo['Valor Cru'].apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
             resumo['Aliq_View'] = resumo['ST'].apply(lambda x: f"{aliq_st*100:.13f}%" if x else f"{aliq_efetiva*100:.13f}%")
 
-            st.markdown("### 📊 Dashboard")
+            st.markdown("### 📊 Dashboard de Apuração")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Faturamento", f"R$ {resumo['Faturamento'].sum():,.2f}")
+            c1.metric("Faturamento Total", f"R$ {resumo['Faturamento'].sum():,.2f}")
             c2.metric("DAS Total", f"R$ {resumo['DAS'].sum():,.2f}")
-            c3.metric("Alíquota Aplicada", f"{aliq_efetiva*100:.6f}%")
+            c3.metric("Alíquota Normal", f"{aliq_efetiva*100:.4f}%")
 
+            st.markdown("### 📑 Resumo Analítico por CFOP")
             st.table(resumo[['CFOP', 'Faturamento', 'Aliq_View', 'DAS']])
+            
+            st.markdown("### 📋 Rastreabilidade")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.error("Notas não encontradas.")
+            st.error("Nenhuma nota encontrada para o CNPJ informado.")
 
 if __name__ == "__main__":
     main()
