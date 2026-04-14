@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Foco: Resumo por CFOP de emissão própria sem alteração do valor total (vNF).
+Foco: Resumo Integral por CFOP (Emissões Próprias) mantendo Base vNF
 """
 
 import zipfile
@@ -49,7 +49,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         chave = inf.attrib.get('Id', '')[3:]
         if not chave or chave in chaves_vistas: return []
         
-        # Filtro de CNPJ para Emissão Própria
         emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
         if cnpj_cliente and emit_cnpj != cnpj_cliente:
             return []
@@ -57,20 +56,32 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
+
+        # Para não cagar o valor total, calculamos a proporção de cada CFOP dentro da nota
+        itens_nota = []
+        v_prod_total_nota = Decimal("0")
         
-        # Pega o CFOP principal da nota (da primeira linha de detalhe)
-        # Mantendo a leitura do valor TOTAL da nota (vNF) para não errar a base
-        det_1 = inf.find(f"{ns}det")
-        cfop_principal = det_1.find(f"{ns}prod/{ns}CFOP").text.replace(".", "") if det_1 is not None else "0000"
-        
-        regs.append({
-            "Nota": n_nota,
-            "Tipo": "SAÍDA" if tipo_op == "1" else "ENTRADA",
-            "CFOP": cfop_principal,
-            "ST": cfop_principal in CFOPS_ST,
-            "Valor (vNF)": v_nf,
-            "Chave": chave
-        })
+        for det in inf.findall(f"{ns}det"):
+            v_p = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
+            cf = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
+            itens_nota.append({"cfop": cf, "valor": v_p})
+            v_prod_total_nota += v_p
+
+        # Agora distribuímos o vNF (Valor Total) proporcionalmente aos CFOPs encontrados
+        # Isso garante que a soma final seja exatamente o vNF, mas segregado por CFOP
+        for item in itens_nota:
+            proporcao = item['valor'] / v_prod_total_nota if v_prod_total_nota > 0 else Decimal("0")
+            valor_proporcional_vnf = (v_nf * proporcao).quantize(Decimal("0.00000001"), ROUND_HALF_UP)
+            
+            regs.append({
+                "Nota": n_nota,
+                "Tipo": "SAÍDA" if tipo_op == "1" else "ENTRADA",
+                "CFOP": item['cfop'],
+                "ST": item['cfop'] in CFOPS_ST,
+                "Valor (vNF)": valor_proporcional_vnf,
+                "Chave": chave
+            })
+            
         chaves_vistas.add(chave)
     except: pass
     return regs
@@ -78,7 +89,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Resumo por CFOP (Base vNF)")
+    st.title("🛡️ Sentinela - Resumo Integral por CFOP")
     
     with st.sidebar:
         st.header("👤 Identificação")
@@ -86,17 +97,17 @@ def main():
         cnpj_cli = limpar_cnpj(cnpj_input)
         
         st.header("⚙️ PGDAS")
-        rbt12_raw = st.text_input("RBT12", value="504.403,47")
+        rbt12_raw = st.text_input("RBT12 Acumulado", value="504.403,47")
         try:
-            rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0.00")
-        except: rbt12 = Decimal("0.00")
+            rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
+        except: rbt12 = Decimal("0")
         
         is_st_toggle = st.toggle("Dedução de ICMS ST (34%)", value=True)
 
-    # Cálculo de Alíquotas
+    # Cálculo Alíquotas
     aliq_nom, deducao = Decimal("0.073"), Decimal("5940.00")
-    aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else Decimal("0.04")
-    aliq_st = aliq_efetiva * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
+    aliq_efcheia = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else Decimal("0.04")
+    aliq_st = aliq_efcheia * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
 
     files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"])
 
@@ -108,24 +119,24 @@ def main():
         
         if registros:
             df = pd.DataFrame(registros)
-            
-            # Dashboard (Faturamento Total vNF)
             df_saida = df[df["Tipo"] == "SAÍDA"].copy()
-            fat_total = df_saida["Valor (vNF)"].sum()
             
-            # Cálculo do DAS Individual (Nota a Nota)
-            df_saida['Aliq'] = df_saida['ST'].apply(lambda x: aliq_st if is_st_toggle and x else aliq_efetiva)
+            # Cálculo de Imposto sobre o valor proporcional
+            df_saida['Aliq'] = df_saida['ST'].apply(lambda x: aliq_st if is_st_toggle and x else aliq_efcheia)
             df_saida['DAS'] = df_saida.apply(lambda r: (r['Valor (vNF)'] * r['Aliq']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
 
             st.markdown("### 📊 Dashboard de Apuração")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Faturamento (vNF)", f"R$ {fat_total:,.2f}")
+            # Soma arredondada para bater com o vNF total submetido
+            total_vnf = df_saida["Valor (vNF)"].sum().quantize(Decimal("0.01"), ROUND_HALF_UP)
+            c1.metric("Faturamento (vNF)", f"R$ {total_vnf:,.2f}")
             c2.metric("DAS Total", f"R$ {df_saida['DAS'].sum():,.2f}")
-            c3.metric("Notas Processadas", len(df_saida))
+            c3.metric("Notas Processadas", df_saida['Nota'].nunique())
 
-            # RESUMO POR CFOP (Considerando apenas emissões próprias de saída)
+            # AGORA O CFOP 5405 VAI APARECER AQUI
             st.markdown("### 📑 Resumo por CFOP (Emissões Próprias)")
             resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor (vNF)': 'sum', 'DAS': 'sum'}).reset_index()
+            resumo['Valor (vNF)'] = resumo['Valor (vNF)'].apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
             resumo['Tributação'] = resumo['ST'].apply(lambda x: "ICMS ST (Dedução 34%)" if x else "Normal")
             
             st.table(resumo[['CFOP', 'Tributação', 'Valor (vNF)', 'DAS']])
