@@ -109,10 +109,15 @@ def main():
 
     with st.sidebar:
         st.header("1. Regra de Cálculo (PGDAS)")
-        # Este é o dado da página 1 do PDF
-        rbt12_input = st.text_input("Faturamento Acumulado (RBT12)", value="256.852,76")
-        rbt12 = Decimal(rbt12_input.replace(".", "").replace(",", "."))
+        # Ajustado para vir zerado conforme solicitado
+        rbt12_input = st.text_input("Faturamento Acumulado (RBT12)", value="0,00")
         
+        # Tratamento de erro para garantir que o cálculo só ocorra se houver valor
+        try:
+            rbt12 = Decimal(rbt12_input.replace(".", "").replace(",", "."))
+        except (InvalidOperation, ValueError):
+            rbt12 = Decimal("0.00")
+            
         nome_anexo = st.selectbox("Anexo da Atividade", options=list(TABELAS_SIMPLES.keys()))
         
         aliq_efetiva = calcular_aliquota_especifica(rbt12, nome_anexo)
@@ -125,22 +130,26 @@ def main():
     files = st.file_uploader("Arraste XMLs ou ZIPs Matrioskas", accept_multiple_files=True, type=["xml", "zip"])
 
     if st.button("🚀 Iniciar Auditoria") and files:
+        if rbt12 <= 0:
+            st.warning("⚠️ O RBT12 está zerado. A alíquota aplicada será a da 1ª faixa (4% para Comércio / 6% para Serviços).")
+
         with st.spinner("O Ceifador está analisando os documentos..."):
             all_data = []
             for f in files:
                 content = f.read()
-                if f.name.lower().endswith('.zip'): all_data.extend(modulo_ceifador_zip(content, f.name))
-                else: all_data.extend(processar_xml_bytes(content, f.name))
+                if f.name.lower().endswith('.zip'): 
+                    all_data.extend(modulo_ceifador_zip(content, f.name))
+                else: 
+                    all_data.extend(processar_xml_bytes(content, f.name))
             
             if not all_data:
-                st.error("Nenhuma nota fiscal de receita ou devolução encontrada.")
+                st.error("Nenhuma nota fiscal de receita ou devolução encontrada nos arquivos enviados.")
                 return
 
             total_rec = sum(d['receita'] for d in all_data)
             total_dev = sum(d['devolucao'] for d in all_data)
             base_liq = max(total_rec - total_dev, Decimal("0.00"))
             
-            # O CÁLCULO INDEPENDENTE QUE VOCÊ VAI COMPARAR
             imposto_apurado = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             st.markdown("---")
