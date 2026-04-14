@@ -132,8 +132,10 @@ def main():
             
             # Cálculo do imposto segregado por CFOP dentro da base
             df_saida = df[df["Tipo"] == "SAÍDA"].copy()
+            
+            # Correção do AttributeError: Aplicando a lógica de cálculo linha a linha para manter a precisão Decimal
             df_saida['Aliq'] = df_saida['ST'].apply(lambda x: aliq_st if is_st_toggle and x else aliq_efetiva_cheia)
-            df_saida['Imp'] = (df_saida['Valor (vNF)'] * df_saida['Aliq']).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            df_saida['Imp'] = df_saida.apply(lambda row: (row['Valor (vNF)'] * row['Aliq']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
             
             valor_das_total = df_saida['Imp'].sum()
 
