@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria Simples Nacional
-Foco: Base de Cálculo por vNF (Valor Total da Nota) e Rastreabilidade Analítica
+Foco: Otimização de input (RBT12 limpo) e Base vNF
 """
 
 import zipfile
@@ -67,7 +67,6 @@ def extrair_dados_xml(conteudo, nome_arquivo, chaves_vistas):
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
         
-        # Analisar CFOPs para decidir se a nota inteira entra na base
         tem_receita = False
         tem_devolucao = False
         
@@ -97,18 +96,25 @@ def ceifador_zip(zip_bytes, chaves_vistas):
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria por Valor Total (vNF)")
+    st.title("🛡️ Sentinela - Auditoria e Rastreabilidade")
     
     with st.sidebar:
         st.header("1. Parâmetros PGDAS")
-        rbt12_input = st.text_input("RBT12 (Página 1)", value="0,00")
+        
+        # CAMPO LIMPO: Alterado para iniciar vazio e facilitar a digitação
+        rbt12_raw = st.text_input("Faturamento Acumulado (RBT12)", value="", placeholder="Digite o valor aqui...")
+        
+        # Conversão segura do input vazio
         try:
-            rbt12 = Decimal(rbt12_input.replace(".", "").replace(",", "."))
-        except: rbt12 = Decimal("0.00")
+            if rbt12_raw.strip() == "":
+                rbt12 = Decimal("0.00")
+            else:
+                rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", "."))
+        except:
+            rbt12 = Decimal("0.00")
         
         nome_anexo = st.selectbox("Anexo Principal", options=list(TABELAS_SIMPLES.keys()))
         
-        # Cálculo da Alíquota
         aliq_efetiva = Decimal("0.00")
         faixa_ativa_num = 1
         for num, inicio, fim, aliq_nom, deducao in TABELAS_SIMPLES[nome_anexo]:
@@ -141,7 +147,6 @@ def main():
         base_liq = max(saidas - devolucoes, Decimal("0.00"))
         imposto = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        # Dashboard de Notas
         nota_min, nota_max = df["Nota"].min(), df["Nota"].max()
 
         st.markdown("### 📊 Resultado da Auditoria (Base vNF)")
@@ -150,11 +155,6 @@ def main():
         c2.metric("Faturamento (vNF)", f"R$ {saidas:,.2f}")
         c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
         c4.metric("IMPOSTO CALCULADO", f"R$ {imposto:,.2f}")
-
-        # Memorial
-        st.markdown("### 📝 Memorial de Cálculo")
-        mem = f"Base Líquida (vNF): R$ {base_liq:,.2f} | Alíquota: {aliq_efetiva*100}% | Total DAS: R$ {imposto:,.2f}"
-        st.markdown(f'<div class="memorial-box">{mem}</div>', unsafe_allow_html=True)
 
         st.markdown("### 📋 Rastreabilidade das Notas")
         st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
