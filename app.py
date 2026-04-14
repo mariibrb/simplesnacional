@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Rastreabilidade
-Foco: Correção de TypeError e Dashboard de Faixas Progressivas
+Foco: Faixa inicial/final de numeração e Dashboard de Faixas Progressivas
 """
 
 import zipfile
@@ -62,7 +62,7 @@ def extrair_dados_xml(conteudo, nome_arquivo, chaves_vistas):
         chave = inf.attrib.get('Id', '')[3:]
         if not chave or chave in chaves_vistas: return []
         
-        n_nota = inf.find(f"{ns}ide/{ns}nNF").text
+        n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text) # Convertido para INT para ordenar
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
         
         for det in inf.findall(f"{ns}det"):
@@ -79,8 +79,7 @@ def extrair_dados_xml(conteudo, nome_arquivo, chaves_vistas):
                     "CFOP": cfop,
                     "Tipo": categoria,
                     "Valor (R$)": v_prod,
-                    "Chave de Acesso": chave,
-                    "Arquivo Original": nome_arquivo
+                    "Chave de Acesso": chave
                 })
         chaves_vistas.add(chave)
     except: pass
@@ -111,7 +110,6 @@ def main():
         
         nome_anexo = st.selectbox("Anexo Principal", options=list(TABELAS_SIMPLES.keys()))
         
-        # Identificar Faixa Ativa e Alíquota
         faixa_ativa_num = 1
         aliq_efetiva = Decimal("0.00")
         for num, inicio, fim, aliq_nom, deducao in TABELAS_SIMPLES[nome_anexo]:
@@ -120,7 +118,7 @@ def main():
                 if rbt12 > 0:
                     aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12
                 else:
-                    aliq_efetiva = aliq_nom # Primeira faixa
+                    aliq_efetiva = aliq_nom
                 break
         
         aliq_efetiva = max(aliq_efetiva, Decimal("0.00")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
@@ -141,7 +139,7 @@ def main():
                 dados_fiscais.extend(extrair_dados_xml(content, f.name, chaves_vistas))
         
         if not dados_fiscais:
-            st.error("Nenhuma nota fiscal relevante encontrada nos arquivos.")
+            st.error("Nenhuma nota fiscal relevante encontrada.")
             return
 
         df = pd.DataFrame(dados_fiscais)
@@ -150,7 +148,20 @@ def main():
         base_liq = max(saidas - devolucoes, Decimal("0.00"))
         imposto = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        # ─── DASHBOARD DE FAIXAS ─────────────────────────────────────────────
+        # ─── DASHBOARD DE RESULTADOS ─────────────────────────────────────────
+        st.markdown("### 📊 Resultado Geral do Lote")
+        
+        # Identificação de Faixa Numérica
+        nota_min = df["Nota"].min()
+        nota_max = df["Nota"].max()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Faixa de Numeração", f"Nº {nota_min} até {nota_max}")
+        c2.metric("Faturamento XML", f"R$ {saidas:,.2f}")
+        c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
+        c4.metric("IMPOSTO CALCULADO", f"R$ {imposto:,.2f}")
+
+        # ─── DASHBOARD DE FAIXAS (ANEXO) ─────────────────────────────────────
         st.markdown("### 📈 Faixas de Faturamento (Simples Nacional)")
         cols_faixas = st.columns(6)
         for i, (num, inicio, fim, aliq_nom, deducao) in enumerate(TABELAS_SIMPLES[nome_anexo]):
@@ -166,17 +177,9 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
-        # ─── RESULTADOS PRINCIPAIS ──────────────────────────────────────────
-        st.markdown("---")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Faturamento XML", f"R$ {saidas:,.2f}")
-        c2.metric("Devoluções XML", f"R$ {devolucoes:,.2f}")
-        c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
-        c4.metric("IMPOSTO CALCULADO", f"R$ {imposto:,.2f}")
-
         # ─── LISTAGEM ANALÍTICA ─────────────────────────────────────────────
         st.markdown("### 📋 Rastreabilidade nota a nota")
-        df_display = df[["Nota", "CFOP", "Tipo", "Valor (R$)", "Chave de Acesso"]]
+        df_display = df.sort_values(by="Nota")[["Nota", "CFOP", "Tipo", "Valor (R$)", "Chave de Acesso"]]
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
