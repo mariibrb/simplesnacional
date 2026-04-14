@@ -1,18 +1,16 @@
 """
 Sentinela Ecosystem - Auditoria Simples Nacional
-Foco: Detecção de duplicidade e Memorial de Cálculo Analítico
+Foco: Rastreabilidade de Notas e Identificação de Devoluções
 """
 
 import os
 import csv
 import zipfile
-import logging
 import io
-import re
-from datetime import datetime
 from xml.etree import ElementTree as ET
-from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from decimal import Decimal, ROUND_HALF_UP
 import streamlit as st
+import pandas as pd
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
@@ -28,7 +26,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ─── TABELAS E REGRAS FISCAIS (ANEXOS I E III) ──────────────────────────────
+# ─── TABELAS E REGRAS FISCAIS ────────────────────────────────────────────────
 
 TABELAS_SIMPLES = {
     "Anexo I (Comércio)": [
@@ -49,14 +47,11 @@ TABELAS_SIMPLES = {
     ]
 }
 
-CFOPS_RECEITA_BRUTA = {
-    "5101", "5102", "5103", "5104", "5105", "5106", "5109", "5110", "5111",
-    "5112", "5113", "5114", "5115", "5116", "5117", "5118", "5119", "5120",
-    "5122", "5123", "5124", "5125", "5403", "5405", "6101", "6102", "6403", "6404"
-}
-CFOPS_DEVOLUCAO_ENTRADA = {"1201", "1202", "1203", "1204", "2201", "2202"}
+# CFOPs de Receita (Saídas) e Devoluções (Entradas que abatem)
+CFOPS_RECEITA = {"5101", "5102", "5403", "5405", "6102", "6403", "6404"}
+CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411"}
 
-# ─── LÓGICA DE AUDITORIA COM TRAVA DE DUPLICIDADE ────────────────────────────
+# ─── PROCESSAMENTO ───────────────────────────────────────────────────────────
 
 def calcular_aliquota_efetiva(rbt12, nome_anexo):
     tabela = TABELAS_SIMPLES[nome_anexo]
@@ -67,113 +62,110 @@ def calcular_aliquota_efetiva(rbt12, nome_anexo):
             return aliq_efetiva.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP), aliq_nom, deducao
     return tabela[-1][1], tabela[-1][1], tabela[-1][2]
 
-def processar_xml_bytes(conteudo, nome_arquivo, chaves_processadas):
-    registros = []
+def extrair_dados_xml(conteudo, chaves_vistas):
+    regs = []
     try:
         root = ET.fromstring(conteudo.lstrip())
         ns = "{http://www.portalfiscal.inf.br/nfe}"
         inf = root.find(f".//{ns}infNFe")
         if inf is None: return []
         
-        # Identificação da Chave (Trava de Duplicidade)
         chave = inf.attrib.get('Id', '')[3:]
-        if not chave or chave in chaves_processadas:
-            return [] # Ignora se já foi processada
+        if not chave or chave in chaves_vistas: return []
         
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
         for det in inf.findall(f"{ns}det"):
             cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
             v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
             
-            val_rec = v_prod if (tipo_op == "1" and cfop in CFOPS_RECEITA_BRUTA) else Decimal("0.00")
-            val_dev = v_prod if (tipo_op == "0" and cfop in CFOPS_DEVOLUCAO_ENTRADA) else Decimal("0.00")
+            # Classificação
+            categoria = "IGNORADO"
+            valor_final = Decimal("0.00")
             
-            if val_rec > 0 or val_dev > 0:
-                registros.append({
-                    "arquivo": nome_arquivo, 
-                    "chave": chave, 
-                    "cfop": cfop, 
-                    "receita": val_rec, 
-                    "devolucao": val_dev
+            if tipo_op == "1" and cfop in CFOPS_RECEITA:
+                categoria = "SAÍDA (RECEITA)"
+                valor_final = v_prod
+            elif tipo_op == "0" and cfop in CFOPS_DEVOLUCAO:
+                categoria = "ENTRADA (DEVOLUÇÃO)"
+                valor_final = v_prod
+                
+            if categoria != "IGNORADO":
+                regs.append({
+                    "Chave de Acesso": chave,
+                    "CFOP": cfop,
+                    "Tipo": categoria,
+                    "Valor (R$)": valor_final
                 })
-        
-        chaves_processadas.add(chave) # Registra a chave como lida
+        chaves_vistas.add(chave)
     except: pass
-    return registros
+    return regs
 
-def modulo_ceifador_zip(zip_bytes, chaves_processadas):
+def ceifador_zip(zip_bytes, chaves_vistas):
     all_regs = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
             content = z.read(name)
-            if name.lower().endswith('.zip'): 
-                all_regs.extend(modulo_ceifador_zip(content, chaves_processadas))
-            elif name.lower().endswith('.xml'): 
-                all_regs.extend(processar_xml_bytes(content, name, chaves_processadas))
+            if name.lower().endswith('.zip'): all_regs.extend(ceifador_zip(content, chaves_vistas))
+            elif name.lower().endswith('.xml'): all_regs.extend(extrair_dados_xml(content, chaves_vistas))
     return all_regs
 
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria com Trava de Duplicidade")
+    st.title("🛡️ Sentinela - Auditoria e Rastreabilidade")
     
     with st.sidebar:
-        st.header("1. Parâmetros PGDAS")
-        rbt12_input = st.text_input("Faturamento Acumulado (RBT12)", value="0,00")
+        st.header("1. Dados do PGDAS")
+        rbt12_input = st.text_input("RBT12 (Acumulado 12 meses)", value="0,00")
         try:
             rbt12 = Decimal(rbt12_input.replace(".", "").replace(",", "."))
         except: rbt12 = Decimal("0.00")
         
-        nome_anexo = st.selectbox("Anexo da Atividade", options=list(TABELAS_SIMPLES.keys()))
+        nome_anexo = st.selectbox("Anexo", options=list(TABELAS_SIMPLES.keys()))
         aliq_efetiva, aliq_nom, deducao = calcular_aliquota_efetiva(rbt12, nome_anexo)
         st.metric("Alíquota Efetiva", f"{(aliq_efetiva * 100):.4f} %")
 
-    st.subheader("2. Upload de Documentos")
-    files = st.file_uploader("Arraste XMLs ou ZIPs Matrioskas", accept_multiple_files=True, type=["xml", "zip"])
+    st.subheader("2. Arquivos para Análise")
+    uploaded_files = st.file_uploader("Upload XML ou ZIP", accept_multiple_files=True, type=["xml", "zip"])
 
-    if st.button("🚀 Executar Auditoria") and files:
-        chaves_processadas = set() # Conjunto para evitar duplicados
-        all_data = []
+    if st.button("🚀 Auditar Agora") and uploaded_files:
+        chaves_vistas = set()
+        dados_fiscais = []
         
-        for f in files:
+        for f in uploaded_files:
             content = f.read()
-            if f.name.lower().endswith('.zip'): 
-                all_data.extend(modulo_ceifador_zip(content, chaves_processadas))
-            else: 
-                all_data.extend(processar_xml_bytes(content, f.name, chaves_processadas))
+            if f.name.lower().endswith('.zip'):
+                dados_fiscais.extend(ceifador_zip(content, chaves_vistas))
+            else:
+                dados_fiscais.extend(extrair_dados_xml(content, chaves_vistas))
         
-        total_rec = sum(d['receita'] for d in all_data)
-        total_dev = sum(d['devolucao'] for d in all_data)
-        base_liq = max(total_rec - total_dev, Decimal("0.00"))
-        imposto_sentinela = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if not dados_fiscais:
+            st.error("Nenhuma nota de Saída ou Devolução encontrada.")
+            return
 
-        # MÉTRICAS
+        df = pd.DataFrame(dados_fiscais)
+        
+        # Consolidação
+        saidas = df[df["Tipo"] == "SAÍDA (RECEITA)"]["Valor (R$)"].sum()
+        devolucoes = df[df["Tipo"] == "ENTRADA (DEVOLUÇÃO)"]["Valor (R$)"].sum()
+        base_calc = max(saidas - devolucoes, Decimal("0.00"))
+        imposto = (base_calc * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Dashboard
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Notas Únicas", len(chaves_processadas))
-        c2.metric("Receita Bruta (XML)", f"R$ {total_rec:,.2f}")
-        c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
-        c4.metric("IMPOSTO APURADO", f"R$ {imposto_sentinela:,.2f}")
+        c1.metric("Faturamento Bruto", f"R$ {saidas:,.2f}")
+        c2.metric("Total Devoluções", f"R$ {devolucoes:,.2f}")
+        c3.metric("Base Líquida", f"R$ {base_calc:,.2f}")
+        c4.metric("DAS APURADO", f"R$ {imposto:,.2f}")
 
-        # MEMORIAL DE CÁLCULO
-        st.markdown("### 📝 Memorial de Cálculo Detalhado")
-        memorial = f"""
-        **1. PARÂMETROS DA ALÍQUOTA (PGDAS)**
-        - RBT12: R$ {rbt12:,.2f}
-        - Alíquota Nominal: {aliq_nom * 100}% | Parcela a Deduzir: R$ {deducao:,.2f}
-        - Fórmula: ((RBT12 * Alíq. Nominal) - Dedução) / RBT12
-        - **Efetiva: {aliq_efetiva * 100}%**
+        # Listagem Analítica
+        st.markdown("### 📋 Listagem de Notas Consideradas")
+        st.dataframe(df, use_container_width=True)
 
-        **2. LEITURA DE DOCUMENTOS (TRAVA ANTI-DUPLICIDADE ATIVA)**
-        - Documentos Únicos Processados: {len(chaves_processadas)}
-        - (+) Receita Bruta Total: R$ {total_rec:,.2f}
-        - (-) Devoluções de Venda: R$ {total_dev:,.2f}
-        - **(=) Base de Cálculo Final: R$ {base_liq:,.2f}**
-
-        **3. APURAÇÃO FINAL**
-        - Base Líquida (R$ {base_liq:,.2f}) x Alíquota ({aliq_efetiva * 100}%)
-        - **VALOR DAS CALCULADO: R$ {imposto_sentinela:,.2f}**
-        """
+        # Memorial
+        st.markdown("### 📝 Memorial de Cálculo")
+        memorial = f"Base Líquida (R$ {base_calc:,.2f}) x Alíquota ({aliq_efetiva*100}%) = R$ {imposto:,.2f}"
         st.markdown(f'<div class="memorial-box">{memorial}</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
