@@ -1,21 +1,20 @@
-
 """
 Apuração do Simples Nacional - Leitura de XMLs (NF-e modelo 55, CT-e modelo 57, NFC-e modelo 65/42)
 Autor: Script gerado conforme especificação fiscal para escritório contábil
 Execução: streamlit run app.py
 """
 
-import pdfplumber
-import re
 import os
 import csv
 import zipfile
 import logging
 import io
+import re
 from datetime import datetime
 from xml.etree import ElementTree as ET
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 import streamlit as st
+import pdfplumber
 
 # ─── ESTILIZAÇÃO E INTERFACE (Tema Rihanna / Montserrat) ──────────────────────
 st.set_page_config(page_title="Apuração Simples Nacional - Sentinela", layout="wide")
@@ -149,6 +148,37 @@ ALIQUOTAS_INTERNAS_UF = {
 
 METODO_DIFAL = "FORA"
 
+# ─── FUNÇÕES DE EXTRAÇÃO DE PDF ───────────────────────────────────────────────
+
+def extrair_aliquota_do_pdf(arquivo_pdf):
+    """Lê o PDF do Extrato do Simples Nacional e calcula a alíquota efetiva."""
+    try:
+        texto_completo = ""
+        with pdfplumber.open(arquivo_pdf) as pdf:
+            for page in pdf.pages:
+                texto_extraido = page.extract_text()
+                if texto_extraido:
+                    texto_completo += texto_extraido + "\n"
+
+        receita_match = re.search(r"Receita Bruta Informada R\$\s*([\d\.]+,\d{2})", texto_completo)
+        imposto_match = re.search(r"Principal\s+[\d\.]+,\d{2}.*?Total\s+([\d\.]+,\d{2})", texto_completo, re.DOTALL)
+        
+        if receita_match and imposto_match:
+            receita_str = receita_match.group(1).replace(".", "").replace(",", ".")
+            imposto_str = imposto_match.group(1).replace(".", "").replace(",", ".")
+            
+            receita = Decimal(receita_str)
+            imposto = Decimal(imposto_str)
+            
+            if receita > 0:
+                aliquota = (imposto / receita) * Decimal("100")
+                return aliquota.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                
+        return None
+    except Exception as e:
+        logging.error(f"Erro ao ler o PDF do Simples: {e}")
+        return None
+
 # ─── FUNÇÕES AUXILIARES ───────────────────────────────────────────────────────
 
 def decimal_seguro(valor_str):
@@ -160,9 +190,6 @@ def decimal_seguro(valor_str):
     except (InvalidOperation, ValueError):
         return Decimal("0.00")
 
-def tag(ns, nome):
-    return f"{ns}{nome}"
-
 def encontrar_texto(elemento, caminho_com_ns):
     try:
         encontrado = elemento.find(caminho_com_ns)
@@ -170,26 +197,6 @@ def encontrar_texto(elemento, caminho_com_ns):
             return encontrado.text.strip()
     except Exception:
         pass
-    return None
-
-def identificar_modelo(root, ns):
-    if ns == NS_NFE:
-        modelo = encontrar_texto(root, f".//{ns}mod")
-        if modelo:
-            return modelo
-        if root.tag == f"{ns}nfeProc" or root.tag == f"{ns}NFe":
-            return "55"
-    elif ns == NS_CTE:
-        return "57"
-    return None
-
-def detectar_namespace(root_tag):
-    if "nfe" in root_tag.lower() or "nfe" in root_tag:
-        return NS_NFE
-    if "cte" in root_tag.lower():
-        return NS_CTE
-    if NS_NFE.replace("{", "").replace("}", "") in root_tag:
-        return NS_NFE
     return None
 
 def calcular_difal(valor_base, aliq_interestadual, aliq_interna_uf, metodo="FORA"):
@@ -223,7 +230,6 @@ def processar_xml_nfe(root, ns, caminho_arquivo, uf_destino_empresa):
         if ide is None:
             raise ValueError("Tag <ide> não encontrada no XML.")
 
-        cnf = encontrar_texto(ide, f"{ns}cNF") or ""
         numero_nf = encontrar_texto(ide, f"{ns}nNF") or ""
         serie = encontrar_texto(ide, f"{ns}serie") or ""
         data_emissao = encontrar_texto(ide, f"{ns}dhEmi") or encontrar_texto(ide, f"{ns}dEmi") or ""
@@ -244,11 +250,6 @@ def processar_xml_nfe(root, ns, caminho_arquivo, uf_destino_empresa):
         nome_dest = encontrar_texto(dest, f"{ns}xNome") or "" if dest is not None else ""
 
         operacao_interestadual = (uf_emit.upper() != uf_dest.upper()) and uf_emit and uf_dest
-
-        total = inf_nfe.find(f"{ns}total/{ns}ICMSTot")
-        v_nf = decimal_seguro(encontrar_texto(total, f"{ns}vNF")) if total is not None else Decimal("0.00")
-        v_prod_total = decimal_seguro(encontrar_texto(total, f"{ns}vProd")) if total is not None else Decimal("0.00")
-        v_desc_total = decimal_seguro(encontrar_texto(total, f"{ns}vDesc")) if total is not None else Decimal("0.00")
 
         for det in inf_nfe.findall(f"{ns}det"):
             prod = det.find(f"{ns}prod")
@@ -374,7 +375,6 @@ def processar_xml_nfe(root, ns, caminho_arquivo, uf_destino_empresa):
 
     return registros
 
-
 def processar_xml_cte(root, ns, caminho_arquivo, uf_destino_empresa):
     registros = []
     try:
@@ -460,7 +460,6 @@ def processar_xml_cte(root, ns, caminho_arquivo, uf_destino_empresa):
 
     return registros
 
-
 def processar_xml_bytes(conteudo_bytes, caminho_referencia, uf_destino_empresa):
     registros = []
     try:
@@ -539,10 +538,6 @@ def extrair_xmls_de_zip(zip_bytes, caminho_zip, uf_destino_empresa, profundidade
     return registros
 
 def processar_uploads_streamlit(uploaded_files, uf_destino_empresa):
-    """
-    Substitui a antiga varrer_diretorio() para lidar com arquivos carregados pelo usuário.
-    Mantém intacta a lógica de processar XML e ZIP.
-    """
     todos_registros = []
     total_erros = 0
 
@@ -647,22 +642,38 @@ def main():
             index=list(ALIQUOTAS_INTERNAS_UF.keys()).index("SP")
         )
         
-        aliq_str = st.text_input("Alíquota Efetiva do Simples (%)", value="6.00")
-        
         st.markdown("---")
-        st.markdown("**Arquivos Suportados:**")
-        st.markdown("- XML (NF-e 55, CT-e 57, NFC-e 65/42)")
-        st.markdown("- ZIP (Pode conter XMLs e outros ZIPs)")
+        st.markdown("**1. Extrato do Simples (PDF)**")
+        pdf_extrato = st.file_uploader(
+            "Upload do Extrato PGDAS para calcular alíquota", 
+            type=["pdf"]
+        )
+        
+        aliquota_simples = Decimal("0.00")
+        if pdf_extrato:
+            with st.spinner("Lendo Extrato..."):
+                aliquota_calculada = extrair_aliquota_do_pdf(pdf_extrato)
+                if aliquota_calculada:
+                    st.success(f"Alíquota Efetiva detectada: {aliquota_calculada}%")
+                    aliquota_simples = aliquota_calculada
+                else:
+                    st.error("Não foi possível localizar os valores no PDF. Insira manualmente abaixo.")
+                    aliq_str = st.text_input("Alíquota Efetiva Manual (%)", value="0.00")
+                    try:
+                        aliquota_simples = Decimal(aliq_str.replace(",", "."))
+                    except:
+                        pass
+        else:
+            st.info("Aguardando PDF do Extrato para definir a alíquota.")
+            aliq_str = st.text_input("Ou informe a Alíquota Efetiva Manual (%)", value="0.00")
+            try:
+                aliquota_simples = Decimal(aliq_str.replace(",", "."))
+            except:
+                pass
 
-    try:
-        aliq_str_limpa = aliq_str.strip().replace(",", ".")
-        aliquota_simples = Decimal(aliq_str_limpa)
-        if not (Decimal("0.00") < aliquota_simples <= Decimal("33.00")):
-            st.sidebar.error("Alíquota fora do intervalo esperado (0 a 33%).")
-            return
-    except (InvalidOperation, ValueError):
-        st.sidebar.error("Alíquota inválida. Use o formato 6.00")
-        return
+        st.markdown("---")
+        st.markdown("**2. Arquivos Fiscais (XML/ZIP)**")
+        st.markdown("- NF-e (55), CT-e (57), NFC-e (65/42)")
 
     st.subheader("Importação de Dados")
     arquivos_upados = st.file_uploader(
@@ -672,9 +683,11 @@ def main():
     )
 
     if st.button("Executar Apuração") and arquivos_upados:
+        if aliquota_simples <= Decimal("0.00"):
+            st.error("Por favor, faça o upload do Extrato do PGDAS ou informe uma alíquota maior que zero na barra lateral antes de processar.")
+            return
+
         with st.spinner("O Ceifador está processando os arquivos..."):
-            
-            # Limpa o log a cada nova execução
             open(LOG_FILE, 'w').close() 
             
             todos_registros, total_erros = processar_uploads_streamlit(arquivos_upados, uf_empresa)
@@ -686,7 +699,6 @@ def main():
             apuracao = consolidar_apuracao(todos_registros, uf_empresa, aliquota_simples)
             exportar_csv(todos_registros)
 
-            # Relatórios
             def fmt(valor):
                 return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -714,7 +726,6 @@ def main():
             if apuracao['notas_sem_categoria'] > 0:
                 st.warning(f"Atenção: {apuracao['notas_sem_categoria']} item(ns) com CFOP não classificado. Revise a planilha analítica.")
 
-            # Botões de Download
             col_btn1, col_btn2 = st.columns(2)
             
             if os.path.exists(CSV_FILE):
