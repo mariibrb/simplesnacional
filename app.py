@@ -1,9 +1,12 @@
 import zipfile
 import io
 from xml.etree import ElementTree as ET
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
+
+# Configuração de precisão global para o Python Decimal
+getcontext().prec = 30 
 
 # ─── CONFIGURAÇÃO E ESTILO (Rihanna / Montserrat) ───────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
@@ -88,7 +91,7 @@ def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente, uf_cliente
 # ─── INTERFACE PRINCIPAL ─────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Integral")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria de Alta Precisão")
     
     with st.sidebar:
         st.header("👤 Cliente")
@@ -97,7 +100,7 @@ def main():
         uf_cli = st.selectbox("UF do Cliente", ["SP", "RJ", "MG", "PR", "SC", "RS", "BA", "GO", "PB", "PE"])
         
         st.header("⚙️ PGDAS")
-        rbt12_raw = st.text_input("RBT12 Acumulado")
+        rbt12_raw = st.text_input("RBT12 Acumulado (Ex: 504403.47)")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
 
     files = st.file_uploader("Upload XML ou ZIP", accept_multiple_files=True, type=["xml", "zip"])
@@ -125,15 +128,19 @@ def main():
         if registros:
             df = pd.DataFrame(registros)
             
-            # Cálculo de Alíquotas
+            # Cálculo de Alíquotas com 16 casas decimais internas para garantir a exibição de 13
             aliq_nom, ded, f_n, p_icms = Decimal("0.04"), Decimal("0"), 1, Decimal("0.335")
             for num, ini, fim, nom, d_val, p_val in TABELAS_SIMPLES:
                 if rbt12 <= fim:
                     f_n, aliq_nom, ded, p_icms = num, nom, d_val, p_val
                     break
             
+            # Alíquota Efetiva Pura
             aliq_ef = ((rbt12 * aliq_nom) - ded) / rbt12 if rbt12 > 0 else aliq_nom
-            aliq_st = (aliq_ef * (Decimal("1.0") - p_icms)).quantize(Decimal("0.000001"), ROUND_HALF_UP)
+            aliq_ef = aliq_ef.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
+            
+            # Alíquota Efetiva ST (Abatendo o ICMS)
+            aliq_st = (aliq_ef * (Decimal("1.0") - p_icms)).quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             
             # Subtração Real: Identifica valor ST para abater da base normal
             val_st_total = df[df['ST'] == True]['Valor'].sum()
@@ -144,29 +151,39 @@ def main():
                 is_st_cfop = cfop in CFOPS_ST
                 v_bruto = df[df['CFOP'] == cfop]['Valor'].sum()
                 
-                # Regra: Se não for ST, subtrai o montante de ST detectado no lote
+                # Regra de Subtração de Base Normal
                 v_liq = v_bruto - val_st_total if (not is_st_cfop and tipo == "SAÍDA") else v_bruto
+                
+                # Definição de Alíquota (Zero para devolução, Reduzida para ST, Cheia para Normal)
                 aliq = aliq_st if is_st_cfop else (Decimal("0") if tipo == "DEVOLUÇÃO" else aliq_ef)
                 imp = (v_liq * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
-                resumo_cfop.append({"CFOP": cfop, "Tipo": tipo, "ST": is_st_cfop, "Bruto": v_bruto, "Líquido": v_liq, "Alíquota": f"{aliq*100:.4f}%", "Imposto": imp})
+                resumo_cfop.append({
+                    "CFOP": cfop, 
+                    "Tipo": tipo, 
+                    "ST": is_st_cfop, 
+                    "Valor Bruto": v_bruto, 
+                    "Base Líquida": v_liq, 
+                    "Alíquota Aplicada": f"{aliq*100:.13f}%", 
+                    "Imposto": imp
+                })
 
             # DASHBOARD
-            st.markdown("### 📊 Dashboard")
+            st.markdown("### 📊 Dashboard de Precisão Fiscal")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Nota Inicial/Final", f"{df['Nota'].min()} a {df['Nota'].max()}")
-            c2.metric("Base Normal Líquida", f"R$ {sum(r['Líquido'] for r in resumo_cfop if not r['ST']):,.2f}")
-            c3.metric("Base ST", f"R$ {val_st_total:,.2f}")
+            c2.metric("Alíquota Efetiva", f"{aliq_ef*100:.13f}%")
+            c3.metric("Base ST Deduzida", f"R$ {val_st_total:,.2f}")
             c4.metric("DAS TOTAL", f"R$ {sum(r['Imposto'] for r in resumo_cfop):,.2f}")
 
             if lista_difal:
-                st.markdown(f'<div class="difal-box">⚠️ <b>DIFAL:</b> R$ {pd.DataFrame(lista_difal)["Valor Base"].sum():,.2f} detectado.</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="difal-box">⚠️ <b>DIFAL ENTRADA:</b> R$ {pd.DataFrame(lista_difal)["Valor Base"].sum():,.2f} detectado em compras interestaduais.</div>', unsafe_allow_html=True)
 
-            st.markdown("### 📝 Memorial por CFOP")
-            st.table(pd.DataFrame(resumo_cfop))
-            st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
-        else:
-            st.warning("⚠️ Nenhuma nota encontrada para este CNPJ.")
-
-if __name__ == "__main__":
-    main()
+            # MEMORIAL DETALHADO POR CFOP
+            st.markdown("### 📝 Memorial de Cálculo (Resumo por CFOP)")
+            st.markdown(f"""
+            <div class="memorial-box">
+                <b>CRUZAMENTO DE BASES (FAIXA {f_n}):</b><br>
+                • Alíquota PGDAS: <span class="highlight">{aliq_ef*100:.13f}%</span><br>
+                • Alíquota ST (Dedução {p_icms*100}%): <b>{aliq_st*100:.13f}%</b><br>
+                • <small>Lógica de Subtração: O valor de R$ {val_st_total:,.2f} (
