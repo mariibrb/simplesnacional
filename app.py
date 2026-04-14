@@ -1,10 +1,8 @@
 """
-Sentinela Ecosystem - Auditoria Simples Nacional
-Foco: Rastreabilidade de Notas e Identificação de Devoluções
+Sentinela Ecosystem - Auditoria e Rastreabilidade
+Foco: Numeração de Notas e Dashboard de Faixas Progressivas
 """
 
-import os
-import csv
 import zipfile
 import io
 from xml.etree import ElementTree as ET
@@ -21,46 +19,37 @@ st.markdown("""
         html, body, [class*="css"] { font-family: 'Montserrat', sans-serif; }
         .stApp { background: radial-gradient(circle at top center, #ffe6f0 0%, #ffb3d1 100%); color: #4a0024; }
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
-        .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
-        .memorial-box { background-color: white; padding: 20px; border-radius: 10px; border: 1px solid #d81b60; font-family: monospace; color: black; }
+        .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .faixa-box { background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #d81b60; margin-bottom: 10px; }
+        .faixa-ativa { background-color: #ffe6f0; border: 2px solid #d81b60; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
-# ─── TABELAS E REGRAS FISCAIS ────────────────────────────────────────────────
+# ─── TABELAS OFICIAIS ────────────────────────────────────────────────────────
 
 TABELAS_SIMPLES = {
     "Anexo I (Comércio)": [
-        (Decimal("180000.00"), Decimal("0.04"), Decimal("0.00")),
-        (Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00")),
-        (Decimal("720000.00"), Decimal("0.095"), Decimal("13860.00")),
-        (Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00")),
-        (Decimal("3600000.00"), Decimal("0.143"), Decimal("87300.00")),
-        (Decimal("4800000.00"), Decimal("0.19"), Decimal("256500.00")),
+        (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00")),
+        (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00")),
+        (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.095"), Decimal("13860.00")),
+        (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00")),
+        (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.143"), Decimal("87300.00")),
+        (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.19"), Decimal("256500.00")),
     ],
     "Anexo III (Serviços)": [
-        (Decimal("180000.00"), Decimal("0.06"), Decimal("0.00")),
-        (Decimal("360000.00"), Decimal("0.112"), Decimal("9360.00")),
-        (Decimal("720000.00"), Decimal("0.135"), Decimal("17640.00")),
-        (Decimal("1800000.00"), Decimal("0.16"), Decimal("35640.00")),
-        (Decimal("3600000.00"), Decimal("0.21"), Decimal("125640.00")),
-        (Decimal("4800000.00"), Decimal("0.33"), Decimal("648000.00")),
+        (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.06"), Decimal("0.00")),
+        (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.112"), Decimal("9360.00")),
+        (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.135"), Decimal("17640.00")),
+        (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.16"), Decimal("35640.00")),
+        (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.21"), Decimal("125640.00")),
+        (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.33"), Decimal("648000.00")),
     ]
 }
 
-# CFOPs de Receita (Saídas) e Devoluções (Entradas que abatem)
 CFOPS_RECEITA = {"5101", "5102", "5403", "5405", "6102", "6403", "6404"}
 CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411"}
 
-# ─── PROCESSAMENTO ───────────────────────────────────────────────────────────
-
-def calcular_aliquota_efetiva(rbt12, nome_anexo):
-    tabela = TABELAS_SIMPLES[nome_anexo]
-    for limite, aliq_nom, deducao in tabela:
-        if rbt12 <= limite:
-            if rbt12 == 0: return aliq_nom, aliq_nom, deducao
-            aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12
-            return aliq_efetiva.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP), aliq_nom, deducao
-    return tabela[-1][1], tabela[-1][1], tabela[-1][2]
+# ─── LÓGICA DE PROCESSAMENTO ─────────────────────────────────────────────────
 
 def extrair_dados_xml(conteudo, chaves_vistas):
     regs = []
@@ -73,28 +62,24 @@ def extrair_dados_xml(conteudo, chaves_vistas):
         chave = inf.attrib.get('Id', '')[3:]
         if not chave or chave in chaves_vistas: return []
         
+        n_nota = inf.find(f"{ns}ide/{ns}nNF").text
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
+        
         for det in inf.findall(f"{ns}det"):
             cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
             v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
             
-            # Classificação
-            categoria = "IGNORADO"
-            valor_final = Decimal("0.00")
-            
-            if tipo_op == "1" and cfop in CFOPS_RECEITA:
-                categoria = "SAÍDA (RECEITA)"
-                valor_final = v_prod
-            elif tipo_op == "0" and cfop in CFOPS_DEVOLUCAO:
-                categoria = "ENTRADA (DEVOLUÇÃO)"
-                valor_final = v_prod
+            categoria = None
+            if tipo_op == "1" and cfop in CFOPS_RECEITA: categoria = "SAÍDA (RECEITA)"
+            elif tipo_op == "0" and cfop in CFOPS_DEVOLUCAO: categoria = "ENTRADA (DEVOLUÇÃO)"
                 
-            if categoria != "IGNORADO":
+            if categoria:
                 regs.append({
-                    "Chave de Acesso": chave,
+                    "Nota": n_nota,
                     "CFOP": cfop,
                     "Tipo": categoria,
-                    "Valor (R$)": valor_final
+                    "Valor (R$)": v_prod,
+                    "Chave de Acesso": chave
                 })
         chaves_vistas.add(chave)
     except: pass
@@ -112,61 +97,84 @@ def ceifador_zip(zip_bytes, chaves_vistas):
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria e Rastreabilidade")
+    st.title("🛡️ Sentinela - Auditoria com Dashboard de Faixas")
     
     with st.sidebar:
-        st.header("1. Dados do PGDAS")
+        st.header("1. Parâmetros PGDAS")
         rbt12_input = st.text_input("RBT12 (Acumulado 12 meses)", value="0,00")
         try:
             rbt12 = Decimal(rbt12_input.replace(".", "").replace(",", "."))
         except: rbt12 = Decimal("0.00")
         
-        nome_anexo = st.selectbox("Anexo", options=list(TABELAS_SIMPLES.keys()))
-        aliq_efetiva, aliq_nom, deducao = calcular_aliquota_efetiva(rbt12, nome_anexo)
+        nome_anexo = st.selectbox("Anexo Principal", options=list(TABELAS_SIMPLES.keys()))
+        
+        # Identificar Faixa Ativa
+        faixa_ativa_num = 1
+        aliq_efetiva = Decimal("0.00")
+        for num, inicio, fim, aliq_nom, deducao in TABELAS_SIMPLES[nome_anexo]:
+            if rbt12 <= fim:
+                faixa_ativa_num = num
+                if rbt12 > 0:
+                    aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12
+                else:
+                    aliq_efetiva = aliq_nom
+                break
+        
         st.metric("Alíquota Efetiva", f"{(aliq_efetiva * 100):.4f} %")
 
-    st.subheader("2. Arquivos para Análise")
-    uploaded_files = st.file_uploader("Upload XML ou ZIP", accept_multiple_files=True, type=["xml", "zip"])
+    st.subheader("2. Upload de Arquivos")
+    files = st.file_uploader("Arraste XMLs ou ZIPs Matrioskas", accept_multiple_files=True, type=["xml", "zip"])
 
-    if st.button("🚀 Auditar Agora") and uploaded_files:
+    if st.button("🚀 Iniciar Auditoria") and files:
         chaves_vistas = set()
         dados_fiscais = []
         
-        for f in uploaded_files:
+        for f in files:
             content = f.read()
             if f.name.lower().endswith('.zip'):
                 dados_fiscais.extend(ceifador_zip(content, chaves_vistas))
             else:
-                dados_fiscais.extend(extrair_dados_xml(content, chaves_vistas))
+                dados_fiscais.extend(extrair_dados_xml(content, f.name, chaves_vistas)) # f.name adicionado aqui
         
         if not dados_fiscais:
-            st.error("Nenhuma nota de Saída ou Devolução encontrada.")
+            st.error("Nenhuma nota fiscal relevante encontrada.")
             return
 
         df = pd.DataFrame(dados_fiscais)
-        
-        # Consolidação
         saidas = df[df["Tipo"] == "SAÍDA (RECEITA)"]["Valor (R$)"].sum()
         devolucoes = df[df["Tipo"] == "ENTRADA (DEVOLUÇÃO)"]["Valor (R$)"].sum()
-        base_calc = max(saidas - devolucoes, Decimal("0.00"))
-        imposto = (base_calc * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        base_liq = max(saidas - devolucoes, Decimal("0.00"))
+        imposto = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        # Dashboard
+        # ─── DASHBOARD DE FAIXAS ─────────────────────────────────────────────
+        st.markdown("### 📈 Faixas de Faturamento (PGDAS)")
+        cols_faixas = st.columns(6)
+        for i, (num, inicio, fim, aliq_nom, deducao) in enumerate(TABELAS_SIMPLES[nome_anexo]):
+            com_estilo = "faixa-ativa" if num == faixa_ativa_num else ""
+            with cols_faixas[i]:
+                st.markdown(f"""
+                <div class="faixa-box {com_estilo}">
+                    <center>
+                    <small>Faixa {num}</small><br>
+                    <b>Até {fim/1000:,.0f}k</b><br>
+                    <small>{aliq_nom*100}%</small>
+                    </center>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ─── RESULTADOS PRINCIPAIS ──────────────────────────────────────────
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Faturamento Bruto", f"R$ {saidas:,.2f}")
-        c2.metric("Total Devoluções", f"R$ {devolucoes:,.2f}")
-        c3.metric("Base Líquida", f"R$ {base_calc:,.2f}")
-        c4.metric("DAS APURADO", f"R$ {imposto:,.2f}")
+        c1.metric("Faturamento XML", f"R$ {saidas:,.2f}")
+        c2.metric("Devoluções", f"R$ {devolucoes:,.2f}")
+        c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
+        c4.metric("IMPOSTO CALCULADO", f"R$ {imposto:,.2f}")
 
-        # Listagem Analítica
-        st.markdown("### 📋 Listagem de Notas Consideradas")
-        st.dataframe(df, use_container_width=True)
-
-        # Memorial
-        st.markdown("### 📝 Memorial de Cálculo")
-        memorial = f"Base Líquida (R$ {base_calc:,.2f}) x Alíquota ({aliq_efetiva*100}%) = R$ {imposto:,.2f}"
-        st.markdown(f'<div class="memorial-box">{memorial}</div>', unsafe_allow_html=True)
+        # ─── LISTAGEM COM NÚMERO DA NOTA ─────────────────────────────────────
+        st.markdown("### 📋 Rastreabilidade de Notas")
+        # Reordenando colunas para o número da nota vir primeiro
+        df = df[["Nota", "CFOP", "Tipo", "Valor (R$)", "Chave de Acesso"]]
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
