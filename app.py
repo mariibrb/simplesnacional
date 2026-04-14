@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Rastreabilidade
-Foco: Numeração de Notas e Dashboard de Faixas Progressivas
+Foco: Correção de TypeError e Dashboard de Faixas Progressivas
 """
 
 import zipfile
@@ -20,7 +20,7 @@ st.markdown("""
         .stApp { background: radial-gradient(circle at top center, #ffe6f0 0%, #ffb3d1 100%); color: #4a0024; }
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .faixa-box { background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #d81b60; margin-bottom: 10px; }
+        .faixa-box { background-color: white; padding: 15px; border-radius: 8px; border: 1px solid #d81b60; margin-bottom: 10px; min-height: 100px; }
         .faixa-ativa { background-color: #ffe6f0; border: 2px solid #d81b60; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
@@ -51,7 +51,7 @@ CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411
 
 # ─── LÓGICA DE PROCESSAMENTO ─────────────────────────────────────────────────
 
-def extrair_dados_xml(conteudo, chaves_vistas):
+def extrair_dados_xml(conteudo, nome_arquivo, chaves_vistas):
     regs = []
     try:
         root = ET.fromstring(conteudo.lstrip())
@@ -79,7 +79,8 @@ def extrair_dados_xml(conteudo, chaves_vistas):
                     "CFOP": cfop,
                     "Tipo": categoria,
                     "Valor (R$)": v_prod,
-                    "Chave de Acesso": chave
+                    "Chave de Acesso": chave,
+                    "Arquivo Original": nome_arquivo
                 })
         chaves_vistas.add(chave)
     except: pass
@@ -90,14 +91,16 @@ def ceifador_zip(zip_bytes, chaves_vistas):
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for name in z.namelist():
             content = z.read(name)
-            if name.lower().endswith('.zip'): all_regs.extend(ceifador_zip(content, chaves_vistas))
-            elif name.lower().endswith('.xml'): all_regs.extend(extrair_dados_xml(content, chaves_vistas))
+            if name.lower().endswith('.zip'): 
+                all_regs.extend(ceifador_zip(content, chaves_vistas))
+            elif name.lower().endswith('.xml'): 
+                all_regs.extend(extrair_dados_xml(content, name, chaves_vistas))
     return all_regs
 
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria com Dashboard de Faixas")
+    st.title("🛡️ Sentinela - Auditoria e Rastreabilidade")
     
     with st.sidebar:
         st.header("1. Parâmetros PGDAS")
@@ -108,7 +111,7 @@ def main():
         
         nome_anexo = st.selectbox("Anexo Principal", options=list(TABELAS_SIMPLES.keys()))
         
-        # Identificar Faixa Ativa
+        # Identificar Faixa Ativa e Alíquota
         faixa_ativa_num = 1
         aliq_efetiva = Decimal("0.00")
         for num, inicio, fim, aliq_nom, deducao in TABELAS_SIMPLES[nome_anexo]:
@@ -117,9 +120,10 @@ def main():
                 if rbt12 > 0:
                     aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12
                 else:
-                    aliq_efetiva = aliq_nom
+                    aliq_efetiva = aliq_nom # Primeira faixa
                 break
         
+        aliq_efetiva = max(aliq_efetiva, Decimal("0.00")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
         st.metric("Alíquota Efetiva", f"{(aliq_efetiva * 100):.4f} %")
 
     st.subheader("2. Upload de Arquivos")
@@ -134,10 +138,10 @@ def main():
             if f.name.lower().endswith('.zip'):
                 dados_fiscais.extend(ceifador_zip(content, chaves_vistas))
             else:
-                dados_fiscais.extend(extrair_dados_xml(content, f.name, chaves_vistas)) # f.name adicionado aqui
+                dados_fiscais.extend(extrair_dados_xml(content, f.name, chaves_vistas))
         
         if not dados_fiscais:
-            st.error("Nenhuma nota fiscal relevante encontrada.")
+            st.error("Nenhuma nota fiscal relevante encontrada nos arquivos.")
             return
 
         df = pd.DataFrame(dados_fiscais)
@@ -147,7 +151,7 @@ def main():
         imposto = (base_liq * aliq_efetiva).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         # ─── DASHBOARD DE FAIXAS ─────────────────────────────────────────────
-        st.markdown("### 📈 Faixas de Faturamento (PGDAS)")
+        st.markdown("### 📈 Faixas de Faturamento (Simples Nacional)")
         cols_faixas = st.columns(6)
         for i, (num, inicio, fim, aliq_nom, deducao) in enumerate(TABELAS_SIMPLES[nome_anexo]):
             com_estilo = "faixa-ativa" if num == faixa_ativa_num else ""
@@ -166,15 +170,14 @@ def main():
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Faturamento XML", f"R$ {saidas:,.2f}")
-        c2.metric("Devoluções", f"R$ {devolucoes:,.2f}")
+        c2.metric("Devoluções XML", f"R$ {devolucoes:,.2f}")
         c3.metric("Base Líquida", f"R$ {base_liq:,.2f}")
         c4.metric("IMPOSTO CALCULADO", f"R$ {imposto:,.2f}")
 
-        # ─── LISTAGEM COM NÚMERO DA NOTA ─────────────────────────────────────
-        st.markdown("### 📋 Rastreabilidade de Notas")
-        # Reordenando colunas para o número da nota vir primeiro
-        df = df[["Nota", "CFOP", "Tipo", "Valor (R$)", "Chave de Acesso"]]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        # ─── LISTAGEM ANALÍTICA ─────────────────────────────────────────────
+        st.markdown("### 📋 Rastreabilidade nota a nota")
+        df_display = df[["Nota", "CFOP", "Tipo", "Valor (R$)", "Chave de Acesso"]]
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
