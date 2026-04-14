@@ -172,19 +172,20 @@ def extrair_aliquota_do_pdf(arquivo_pdf):
             
             if receita > 0:
                 aliquota = (imposto / receita) * Decimal("100")
-                return aliquota.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                return aliquota.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP), receita, imposto
                 
-        return None
+        return None, None, None
     except Exception as e:
         logging.error(f"Erro ao ler o PDF do Simples: {e}")
-        return None
+        return None, None, None
 
 # ─── FUNÇÕES AUXILIARES ───────────────────────────────────────────────────────
 
 def decimal_seguro(valor_str):
     if valor_str is None:
         return Decimal("0.00")
-    valor_limpo = valor_str.strip().replace(",", ".")
+    # Limpeza para padrão brasileiro (pontos em milhar e vírgula em decimal)
+    valor_limpo = valor_str.strip().replace(".", "").replace(",", ".")
     try:
         return Decimal(valor_limpo).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except (InvalidOperation, ValueError):
@@ -478,15 +479,12 @@ def processar_xml_bytes(conteudo_bytes, caminho_referencia, uf_destino_empresa):
         if "nfe" in root_tag or "nfeproc" in root_tag or "nfenfe" in root_tag:
             ns = NS_NFE
             registros = processar_xml_nfe(root, ns, caminho_referencia, uf_destino_empresa)
-
         elif "cte" in root_tag or "cteproc" in root_tag:
             ns = NS_CTE
             registros = processar_xml_cte(root, ns, caminho_referencia, uf_destino_empresa)
-
         elif "nfinf" in root_tag or "nfcenfe" in root_tag:
             ns = NS_NFE
             registros = processar_xml_nfe(root, ns, caminho_referencia, uf_destino_empresa)
-
         else:
             if NS_NFE in root.tag:
                 registros = processar_xml_nfe(root, NS_NFE, caminho_referencia, uf_destino_empresa)
@@ -500,7 +498,7 @@ def processar_xml_bytes(conteudo_bytes, caminho_referencia, uf_destino_empresa):
 
     return registros
 
-# ─── MÓDULO CEIFADOR: VARREDURA RECURSIVA DE ARQUIVOS (Adaptado para Memória) ─
+# ─── MÓDULO CEIFADOR: VARREDURA RECURSIVA DE ARQUIVOS ─────────────────────────
 
 def extrair_xmls_de_zip(zip_bytes, caminho_zip, uf_destino_empresa, profundidade=0):
     registros = []
@@ -514,24 +512,14 @@ def extrair_xmls_de_zip(zip_bytes, caminho_zip, uf_destino_empresa, profundidade
                 try:
                     caminho_membro = f"{caminho_zip}/{nome_membro}"
                     conteudo = zf.read(nome_membro)
-
                     if nome_membro.lower().endswith(".zip"):
-                        registros_zip = extrair_xmls_de_zip(
-                            conteudo, caminho_membro, uf_destino_empresa, profundidade + 1
-                        )
+                        registros_zip = extrair_xmls_de_zip(conteudo, caminho_membro, uf_destino_empresa, profundidade + 1)
                         registros.extend(registros_zip)
-
                     elif nome_membro.lower().endswith(".xml"):
                         registros_xml = processar_xml_bytes(conteudo, caminho_membro, uf_destino_empresa)
                         registros.extend(registros_xml)
-
-                except zipfile.BadZipFile:
-                    logging.error(f"ZIP interno corrompido | {caminho_zip}/{nome_membro}")
                 except Exception as e:
                     logging.error(f"Erro ao extrair membro do ZIP | {caminho_zip}/{nome_membro} | {e}")
-
-    except zipfile.BadZipFile:
-        logging.error(f"Arquivo ZIP corrompido ou inválido | {caminho_zip}")
     except Exception as e:
         logging.error(f"Erro inesperado ao abrir ZIP | {caminho_zip} | {e}")
 
@@ -540,25 +528,19 @@ def extrair_xmls_de_zip(zip_bytes, caminho_zip, uf_destino_empresa, profundidade
 def processar_uploads_streamlit(uploaded_files, uf_destino_empresa):
     todos_registros = []
     total_erros = 0
-
     for file in uploaded_files:
         nome_arquivo = file.name
-        nome_lower = nome_arquivo.lower()
         conteudo = file.read()
-
         try:
-            if nome_lower.endswith(".xml"):
+            if nome_arquivo.lower().endswith(".xml"):
                 registros = processar_xml_bytes(conteudo, nome_arquivo, uf_destino_empresa)
                 todos_registros.extend(registros)
-
-            elif nome_lower.endswith(".zip"):
+            elif nome_arquivo.lower().endswith(".zip"):
                 registros = extrair_xmls_de_zip(conteudo, nome_arquivo, uf_destino_empresa)
                 todos_registros.extend(registros)
-
         except Exception as e:
             logging.error(f"Erro ao acessar arquivo | {nome_arquivo} | {e}")
             total_erros += 1
-
     return todos_registros, total_erros
 
 # ─── CONSOLIDAÇÃO E RELATÓRIO ─────────────────────────────────────────────────
@@ -569,8 +551,6 @@ def consolidar_apuracao(todos_registros, uf_destino_empresa, aliquota_simples_in
     entradas_interestaduais_total = Decimal("0.00")
     difal_uso_consumo_total = Decimal("0.00")
     antecipacao_revenda_total = Decimal("0.00")
-
-    notas_sem_categoria = 0
 
     for reg in todos_registros:
         try:
@@ -584,23 +564,14 @@ def consolidar_apuracao(todos_registros, uf_destino_empresa, aliquota_simples_in
                 difal_uso_consumo_total += difal_calculado
             elif tipo_difal == "ANTECIPACAO_REVENDA":
                 antecipacao_revenda_total += difal_calculado
-
-            if reg["categoria_fiscal"] == "NAO_IDENTIFICADO":
-                notas_sem_categoria += 1
-
-        except (InvalidOperation, KeyError):
+        except:
             pass
 
-    base_calculo_liquida = receita_bruta_total - devoluções_total
-    if base_calculo_liquida < Decimal("0.00"):
-        base_calculo_liquida = Decimal("0.00")
-
+    base_calculo_liquida = max(receita_bruta_total - devoluções_total, Decimal("0.00"))
     aliquota_das = aliquota_simples_informada / Decimal("100")
     valor_estimado_das = (base_calculo_liquida * aliquota_das).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
     difal_total = difal_uso_consumo_total + antecipacao_revenda_total
-    total_geral_impostos = valor_estimado_das + difal_total
-
+    
     return {
         "receita_bruta_total": receita_bruta_total,
         "devoluções_total": devoluções_total,
@@ -611,140 +582,108 @@ def consolidar_apuracao(todos_registros, uf_destino_empresa, aliquota_simples_in
         "difal_uso_consumo_total": difal_uso_consumo_total,
         "antecipacao_revenda_total": antecipacao_revenda_total,
         "difal_total": difal_total,
-        "total_geral_impostos": total_geral_impostos,
         "total_registros": len(todos_registros),
-        "notas_sem_categoria": notas_sem_categoria,
     }
 
 def exportar_csv(todos_registros):
-    if not todos_registros:
-        return
+    if not todos_registros: return
     campos = list(todos_registros[0].keys())
     try:
         with open(CSV_FILE, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=campos, delimiter=";")
             writer.writeheader()
             writer.writerows(todos_registros)
-    except Exception as e:
-        logging.error(f"Erro ao exportar CSV | {e}")
+    except: pass
 
 # ─── INTERFACE STREAMLIT ──────────────────────────────────────────────────────
 
 def main():
     st.title("🛡️ Sentinela - Apuração Simples Nacional")
-    st.markdown("Módulo Web para processamento de arquivos XML fiscais, suportando *ZIPs Matrioskas* e geração do relatório detalhado para envio ao cliente.")
+    st.markdown("Auditoria de XMLs fiscais vs PGDAS.")
     
     with st.sidebar:
-        st.header("Configurações Fiscais")
-        uf_empresa = st.selectbox(
-            "UF da Empresa", 
-            options=list(ALIQUOTAS_INTERNAS_UF.keys()),
-            index=list(ALIQUOTAS_INTERNAS_UF.keys()).index("SP")
-        )
+        st.header("1. Configurações Fiscais")
+        uf_empresa = st.selectbox("UF da Empresa", options=list(ALIQUOTAS_INTERNAS_UF.keys()), index=list(ALIQUOTAS_INTERNAS_UF.keys()).index("SP"))
         
         st.markdown("---")
-        st.markdown("**1. Extrato do Simples (PDF)**")
-        pdf_extrato = st.file_uploader(
-            "Upload do Extrato PGDAS para calcular alíquota", 
-            type=["pdf"]
-        )
+        st.header("2. Dados do PGDAS (Para Comparação)")
         
-        aliquota_simples = Decimal("0.00")
+        # Tentativa de leitura automática via PDF
+        pdf_extrato = st.file_uploader("Upload do Extrato PGDAS (Opcional)", type=["pdf"])
+        
+        faturamento_pgdas = Decimal("0.00")
+        imposto_pgdas = Decimal("0.00")
+        aliquota_detectada = None
+        
         if pdf_extrato:
             with st.spinner("Lendo Extrato..."):
-                aliquota_calculada = extrair_aliquota_do_pdf(pdf_extrato)
-                if aliquota_calculada:
-                    st.success(f"Alíquota Efetiva detectada: {aliquota_calculada}%")
-                    aliquota_simples = aliquota_calculada
-                else:
-                    st.error("Não foi possível localizar os valores no PDF. Insira manualmente abaixo.")
-                    aliq_str = st.text_input("Alíquota Efetiva Manual (%)", value="0.00")
-                    try:
-                        aliquota_simples = Decimal(aliq_str.replace(",", "."))
-                    except:
-                        pass
-        else:
-            st.info("Aguardando PDF do Extrato para definir a alíquota.")
-            aliq_str = st.text_input("Ou informe a Alíquota Efetiva Manual (%)", value="0.00")
-            try:
-                aliquota_simples = Decimal(aliq_str.replace(",", "."))
-            except:
-                pass
-
+                aliquota_detectada, f_auto, i_auto = extrair_aliquota_do_pdf(pdf_extrato)
+                if aliquota_detectada:
+                    faturamento_pgdas = f_auto
+                    imposto_pgdas = i_auto
+        
+        # Campos de digitação manual (sempre visíveis ou pré-preenchidos pelo PDF)
+        fat_manual = st.text_input("Faturamento Bruto no PGDAS (R$)", value=str(faturamento_pgdas).replace(".", ","))
+        imp_manual = st.text_input("Valor Total do DAS (R$)", value=str(imposto_pgdas).replace(".", ","))
+        
+        faturamento_pgdas = decimal_seguro(fat_manual)
+        imposto_pgdas = decimal_seguro(imp_manual)
+        
+        aliquota_final = Decimal("0.00")
+        if faturamento_pgdas > 0:
+            aliquota_final = (imposto_pgdas / faturamento_pgdas * Decimal("100")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+            st.info(f"Alíquota Efetiva Calculada: {aliquota_final}%")
+        
         st.markdown("---")
-        st.markdown("**2. Arquivos Fiscais (XML/ZIP)**")
-        st.markdown("- NF-e (55), CT-e (57), NFC-e (65/42)")
+        st.markdown("**3. Arquivos Fiscais (XML/ZIP)**")
 
     st.subheader("Importação de Dados")
-    arquivos_upados = st.file_uploader(
-        "Arraste os arquivos XML ou ZIP contendo as notas", 
-        accept_multiple_files=True, 
-        type=["xml", "zip"]
-    )
+    arquivos_upados = st.file_uploader("Arraste os arquivos XML ou ZIP contendo as notas", accept_multiple_files=True, type=["xml", "zip"])
 
     if st.button("Executar Apuração") and arquivos_upados:
-        if aliquota_simples <= Decimal("0.00"):
-            st.error("Por favor, faça o upload do Extrato do PGDAS ou informe uma alíquota maior que zero na barra lateral antes de processar.")
+        if aliquota_final <= 0:
+            st.error("Informe os valores do PGDAS para calcular a alíquota.")
             return
 
-        with st.spinner("O Ceifador está processando os arquivos..."):
-            open(LOG_FILE, 'w').close() 
-            
+        with st.spinner("Processando..."):
             todos_registros, total_erros = processar_uploads_streamlit(arquivos_upados, uf_empresa)
-
             if not todos_registros:
-                st.warning("Nenhum documento fiscal processado com sucesso. Verifique os arquivos.")
+                st.warning("Nenhum registro encontrado.")
                 return
             
-            apuracao = consolidar_apuracao(todos_registros, uf_empresa, aliquota_simples)
+            apuracao = consolidar_apuracao(todos_registros, uf_empresa, aliquota_final)
             exportar_csv(todos_registros)
 
             def fmt(valor):
                 return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-            st.success(f"Apuração concluída! {apuracao['total_registros']} itens processados (Erros ignorados: {total_erros}).")
+            st.success(f"Apuração concluída! {apuracao['total_registros']} itens processados.")
 
-            col1, col2 = st.columns(2)
+            # PAINEL DE COMPARAÇÃO (O que você pediu)
+            st.markdown("## 📊 Auditoria: XML vs PGDAS")
+            c1, c2, c3 = st.columns(3)
             
-            with col1:
-                st.markdown("### Apuração do DAS (Saídas)")
-                st.metric("Receita Bruta Total", fmt(apuracao['receita_bruta_total']))
-                st.metric("(-) Devoluções de Vendas", fmt(apuracao['devoluções_total']))
-                st.metric("Base de Cálculo Líquida", fmt(apuracao['base_calculo_liquida']))
-                st.metric(f"Valor Estimado do DAS ({apuracao['aliquota_simples']}%)", fmt(apuracao['valor_estimado_das']))
+            dif_fat = apuracao['receita_bruta_total'] - faturamento_pgdas
+            dif_imp = apuracao['valor_estimado_das'] - imposto_pgdas
             
-            with col2:
-                st.markdown("### Apuração de DIFAL / Antecipação (Entradas)")
-                st.metric("Compras Interestaduais", fmt(apuracao['entradas_interestaduais_total']))
-                st.metric("DIFAL Uso/Consumo", fmt(apuracao['difal_uso_consumo_total']))
-                st.metric("Antecipação Tributária", fmt(apuracao['antecipacao_revenda_total']))
-                st.metric("Total DIFAL + Antecipação", fmt(apuracao['difal_total']))
+            with c1:
+                st.metric("Faturamento (XML)", fmt(apuracao['receita_bruta_total']), delta=f"{fmt(dif_fat)} vs PGDAS", delta_color="inverse")
+            with c2:
+                st.metric("Imposto Estimado (XML)", fmt(apuracao['valor_estimado_das']), delta=f"{fmt(dif_imp)} vs PGDAS", delta_color="inverse")
+            with c3:
+                st.metric("Alíquota Aplicada", f"{aliquota_final}%")
+
+            if abs(dif_imp) > Decimal("0.05"):
+                st.error(f"⚠️ DIVERGÊNCIA DETECTADA: O valor calculado pelos XMLs diverge do PGDAS em {fmt(dif_imp)}.")
+            else:
+                st.balloons()
+                st.success("✅ CONFERÊNCIA OK: Os valores dos XMLs batem com a sua apuração manual!")
 
             st.markdown("---")
-            st.markdown(f"### **TOTAL GERAL DE IMPOSTOS DO PERÍODO: {fmt(apuracao['total_geral_impostos'])}**")
-
-            if apuracao['notas_sem_categoria'] > 0:
-                st.warning(f"Atenção: {apuracao['notas_sem_categoria']} item(ns) com CFOP não classificado. Revise a planilha analítica.")
-
             col_btn1, col_btn2 = st.columns(2)
-            
             if os.path.exists(CSV_FILE):
                 with open(CSV_FILE, "rb") as file:
-                    col_btn1.download_button(
-                        label="📥 Baixar Planilha Analítica (CSV)",
-                        data=file,
-                        file_name=CSV_FILE,
-                        mime="text/csv"
-                    )
-            
-            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
-                with open(LOG_FILE, "rb") as log_file:
-                    col_btn2.download_button(
-                        label="⚠️ Baixar Log de Erros",
-                        data=log_file,
-                        file_name=LOG_FILE,
-                        mime="text/plain"
-                    )
+                    col_btn1.download_button(label="📥 Baixar Planilha Analítica (CSV)", data=file, file_name=CSV_FILE, mime="text/csv")
 
 if __name__ == "__main__":
     main()
