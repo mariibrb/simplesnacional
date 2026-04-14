@@ -5,10 +5,10 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Configuração de precisão global para o Python Decimal
+# Precisão extrema para bater com o PGDAS (conforme PDF da Emir Mimessi)
 getcontext().prec = 30 
 
-# ─── CONFIGURAÇÃO E ESTILO (Rihanna / Montserrat) ───────────────────────────
+# ─── ESTILO RIHANNA / MONTSERRAT ─────────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
 
 st.markdown("""
@@ -19,7 +19,6 @@ st.markdown("""
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .memorial-box { background-color: white; padding: 25px; border-radius: 10px; border: 1px solid #d81b60; color: black; line-height: 1.6; }
-        .difal-box { background-color: #fff3f8; padding: 15px; border-radius: 10px; border-left: 5px solid #ff4081; margin-top: 10px; color: #4a0024; }
         .highlight { color: #d81b60; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
@@ -31,7 +30,6 @@ TABELAS_SIMPLES = [
     (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.095"), Decimal("13860.00"), Decimal("0.3350")),
     (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00"), Decimal("0.3350")),
 ]
-
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404"}
 CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411"}
 
@@ -57,12 +55,9 @@ def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente, uf_cliente
         chave = inf.attrib.get('Id', '')[3:]
         if not chave or chave in chaves_vistas or chave in chaves_canc: return [], []
         
-        emit = inf.find(f"{ns}emit")
-        emit_cnpj = emit.find(f"{ns}CNPJ").text
-        emit_uf = emit.find(f"{ns}enderEmit/{ns}UF").text
-        
-        dest = inf.find(f"{ns}dest")
-        dest_cnpj = dest.find(f"{ns}CNPJ").text if dest is not None and dest.find(f"{ns}CNPJ") is not None else ""
+        emit_cnpj = inf.find(f"{ns}emit/{ns}CNPJ").text
+        emit_uf = inf.find(f"{ns}enderEmit/{ns}UF").text
+        dest_cnpj = inf.find(f"{ns}dest/{ns}CNPJ").text if inf.find(f"{ns}dest") is not None else ""
         
         n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
@@ -75,7 +70,6 @@ def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente, uf_cliente
                 is_st = (csosn is not None and csosn.text == "500") or cfop in CFOPS_ST
                 regs.append({"Nota": n_nota, "Tipo": "SAÍDA", "CFOP": cfop, "Valor": v_prod, "ST": is_st, "Chave": chave})
             chaves_vistas.add(chave)
-
         elif dest_cnpj == cnpj_cliente and tipo_op == "0":
             for det in inf.findall(f"{ns}det"):
                 cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
@@ -88,18 +82,15 @@ def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente, uf_cliente
     except: pass
     return regs, difal_regs
 
-# ─── INTERFACE PRINCIPAL ─────────────────────────────────────────────────────
+# ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria de Alta Precisão")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Universal e Memorial")
     
     with st.sidebar:
-        st.header("👤 Cliente")
         cnpj_input = st.text_input("CNPJ do Cliente (somente números)")
         cnpj_cli = "".join(filter(str.isdigit, cnpj_input))
         uf_cli = st.selectbox("UF do Cliente", ["SP", "RJ", "MG", "PR", "SC", "RS", "BA", "GO", "PB", "PE"])
-        
-        st.header("⚙️ PGDAS")
         rbt12_raw = st.text_input("RBT12 Acumulado (Ex: 504403.47)")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
 
@@ -128,76 +119,67 @@ def main():
         if registros:
             df = pd.DataFrame(registros)
             
-            # Cálculo de Alíquotas com 16 casas decimais internas para garantir a exibição de 13
+            # Cálculo de Alíquotas (13 casas decimais conforme PGDAS)
             aliq_nom, ded, f_n, p_icms = Decimal("0.04"), Decimal("0"), 1, Decimal("0.335")
             for num, ini, fim, nom, d_val, p_val in TABELAS_SIMPLES:
                 if rbt12 <= fim:
                     f_n, aliq_nom, ded, p_icms = num, nom, d_val, p_val
                     break
             
-            # Alíquota Efetiva Pura
             aliq_ef = ((rbt12 * aliq_nom) - ded) / rbt12 if rbt12 > 0 else aliq_nom
             aliq_ef = aliq_ef.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
-            
-            # Alíquota Efetiva ST (Abatendo o ICMS)
             aliq_st = (aliq_ef * (Decimal("1.0") - p_icms)).quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             
-            # Subtração Real: Identifica valor ST para abater da base normal
+            # Totais do Lote
+            fat_bruto_total = df[df['Tipo'] == "SAÍDA"]['Valor'].sum()
             val_st_total = df[df['ST'] == True]['Valor'].sum()
+            dev_total = df[df['Tipo'] == "DEVOLUÇÃO"]['Valor'].sum()
             
+            # Agrupamento para Memorial por CFOP
             resumo_cfop = []
             for cfop in df['CFOP'].unique():
                 tipo = df[df['CFOP'] == cfop]['Tipo'].iloc[0]
-                is_st_cfop = cfop in CFOPS_ST
+                is_st = cfop in CFOPS_ST
                 v_bruto = df[df['CFOP'] == cfop]['Valor'].sum()
                 
-                # Regra de Subtração de Base Normal
-                v_liq = v_bruto - val_st_total if (not is_st_cfop and tipo == "SAÍDA") else v_bruto
-                
-                # Definição de Alíquota (Zero para devolução, Reduzida para ST, Cheia para Normal)
-                aliq = aliq_st if is_st_cfop else (Decimal("0") if tipo == "DEVOLUÇÃO" else aliq_ef)
+                # Regra de Subtração de Base ST da Base Normal
+                v_liq = v_bruto - val_st_total if (not is_st and tipo == "SAÍDA") else v_bruto
+                aliq = aliq_st if is_st else (Decimal("0") if tipo == "DEVOLUÇÃO" else aliq_ef)
                 imp = (v_liq * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
                 resumo_cfop.append({
-                    "CFOP": cfop, 
-                    "Tipo": tipo, 
-                    "ST": is_st_cfop, 
-                    "Valor Bruto": v_bruto, 
-                    "Base Líquida": v_liq, 
-                    "Alíquota Aplicada": f"{aliq*100:.13f}%", 
-                    "Imposto": imp
+                    "CFOP": cfop, "Tipo": tipo, "ST": is_st, 
+                    "Valor Bruto": v_bruto, "Base Líquida": v_liq, 
+                    "Alíquota": f"{aliq*100:.13f}%", "Imposto": imp
                 })
 
             # DASHBOARD
-            st.markdown("### 📊 Dashboard de Precisão Fiscal")
+            st.markdown("### 📊 Dashboard de Conferência")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Nota Inicial/Final", f"{df['Nota'].min()} a {df['Nota'].max()}")
-            c2.metric("Alíquota Efetiva", f"{aliq_ef*100:.13f}%")
-            c3.metric("Base ST Deduzida", f"R$ {val_st_total:,.2f}")
+            c1.metric("Faturamento Bruto (vNF)", f"R$ {fat_bruto_total:,.2f}")
+            c2.metric("Base Normal Líquida", f"R$ {fat_bruto_total - val_st_total:,.2f}")
+            c3.metric("Base ST", f"R$ {val_st_total:,.2f}")
             c4.metric("DAS TOTAL", f"R$ {sum(r['Imposto'] for r in resumo_cfop):,.2f}")
 
-            if lista_difal:
-                st.markdown(f'<div class="difal-box">⚠️ <b>DIFAL ENTRADA:</b> R$ {pd.DataFrame(lista_difal)["Valor Base"].sum():,.2f} detectado em compras interestaduais.</div>', unsafe_allow_html=True)
-
-            # MEMORIAL DETALHADO POR CFOP
-            st.markdown("### 📝 Memorial de Cálculo (Resumo por CFOP)")
+            # MEMORIAL DETALHADO
+            st.markdown("### 📝 Memorial de Cálculo por CFOP")
             st.markdown(f"""
             <div class="memorial-box">
-                <b>CRUZAMENTO DE BASES (FAIXA {f_n}):</b><br>
-                • Alíquota PGDAS: <span class="highlight">{aliq_ef*100:.13f}%</span><br>
-                • Alíquota ST (Dedução {p_icms*100}%): <b>{aliq_st*100:.13f}%</b><br>
-                • <small>Lógica de Subtração: O valor de R$ {val_st_total:,.2f} (ST) foi abatido do faturamento bruto para evitar bitributação.</small>
+                <b>RESUMO DO FATURAMENTO (EMPRESA: {cnpj_cli}):</b><br>
+                • Faturamento Bruto Total (vNF): <b>R$ {fat_bruto_total:,.2f}</b><br>
+                • Alíquota PGDAS: {aliq_ef*100:.13f}% | Alíquota ST: {aliq_st*100:.13f}%<br>
+                • <small>Subtração de Base: O valor de R$ {val_st_total:,.2f} foi deduzido da base normal para tributação em separado.</small>
             </div>
             """, unsafe_allow_html=True)
             
-            # Tabela de CFOPs com valores formatados
-            df_display = pd.DataFrame(resumo_cfop)
-            st.table(df_display[['CFOP', 'Tipo', 'ST', 'Valor Bruto', 'Base Líquida', 'Alíquota Aplicada', 'Imposto']])
+            st.table(pd.DataFrame(resumo_cfop)[['CFOP', 'Tipo', 'ST', 'Valor Bruto', 'Base Líquida', 'Alíquota', 'Imposto']])
             
-            st.markdown("### 📋 Rastreabilidade nota a nota")
+            if lista_difal:
+                st.info(f"⚠️ **DIFAL de Entrada:** Detectado R$ {pd.DataFrame(lista_difal)['Valor Base'].sum():,.2f} em notas interestaduais.")
+
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.warning("⚠️ Nenhuma nota encontrada para este CNPJ.")
+            st.warning("Nenhuma nota autorizada para este CNPJ foi encontrada.")
 
 if __name__ == "__main__":
     main()
