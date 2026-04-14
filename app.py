@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Foco: Conciliação Analítica com Divisão/Trava de CNPJ
+Foco: Conciliação Analítica com Divisão/Trava de CNPJ e Segregação por CFOP
 """
 
 import zipfile
@@ -31,6 +31,7 @@ st.markdown("""
 
 # ─── REGRAS FISCAIS (ANEXO I - COMÉRCIO) ─────────────────────────────────────
 PERC_ICMS_ANEXO_I = Decimal("0.34")
+CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404"}
 
 # ─── FUNÇÕES DE APOIO ────────────────────────────────────────────────────────
 
@@ -60,9 +61,15 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text # 1=Saída, 0=Entrada
         
+        # Captura o primeiro CFOP da nota para o resumo (sem mexer no valor vNF)
+        primeiro_det = inf.find(f"{ns}det")
+        cfop_nota = primeiro_det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "") if primeiro_det is not None else "0000"
+        
         regs.append({
             "Nota": n_nota,
             "Tipo": "SAÍDA" if tipo_op == "1" else "ENTRADA",
+            "CFOP": cfop_nota,
+            "ST": cfop_nota in CFOPS_ST,
             "Valor (vNF)": v_nf,
             "Chave": chave
         })
@@ -88,7 +95,7 @@ def main():
         except: rbt12 = Decimal("0.00")
         
         st.info("Configurado para: Anexo I (Comércio)")
-        is_st = st.toggle("Dedução de ICMS ST (34%)", value=True)
+        is_st_toggle = st.toggle("Dedução de ICMS ST (34%)", value=True)
 
     # ─── CÁLCULO DA ALÍQUOTA (DINÂMICO) ──────────────────────────────────────
     aliq_nom = Decimal("0.073")
@@ -99,11 +106,12 @@ def main():
     else:
         aliq_efetiva_cheia = Decimal("0.04")
 
-    aliq_apuracao = aliq_efetiva_cheia
-    if is_st:
-        aliq_apuracao = aliq_efetiva_cheia * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
+    # Alíquota normal e Alíquota com dedução de ST
+    aliq_st = aliq_efetiva_cheia * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
     
-    aliq_apuracao = aliq_apuracao.quantize(Decimal("0.000001"), ROUND_HALF_UP)
+    # Arredondamento para visualização
+    aliq_st_view = aliq_st.quantize(Decimal("0.000001"), ROUND_HALF_UP)
+    aliq_ef_view = aliq_efetiva_cheia.quantize(Decimal("0.000001"), ROUND_HALF_UP)
 
     # ─── PROCESSAMENTO ───────────────────────────────────────────────────────
     files = st.file_uploader("Upload XMLs para Auditoria", accept_multiple_files=True, type=["xml"])
@@ -116,18 +124,25 @@ def main():
         
         if registros:
             df = pd.DataFrame(registros)
+            
+            # Somas brutas (idênticas à sua base original)
             fat_bruto = df[df["Tipo"] == "SAÍDA"]["Valor (vNF)"].sum()
             dev_bruto = df[df["Tipo"] == "ENTRADA"]["Valor (vNF)"].sum()
             base_liquida = max(fat_bruto - dev_bruto, Decimal("0.00"))
             
-            valor_das = (base_liquida * aliq_apuracao).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            # Cálculo do imposto segregado por CFOP dentro da base
+            df_saida = df[df["Tipo"] == "SAÍDA"].copy()
+            df_saida['Aliq'] = df_saida['ST'].apply(lambda x: aliq_st if is_st_toggle and x else aliq_efetiva_cheia)
+            df_saida['Imp'] = (df_saida['Valor (vNF)'] * df_saida['Aliq']).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            
+            valor_das_total = df_saida['Imp'].sum()
 
             st.markdown("### 📊 Dashboard de Conciliação")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Faturamento (vNF)", f"R$ {fat_bruto:,.2f}")
             c2.metric("Base Líquida", f"R$ {base_liquida:,.2f}")
-            c3.metric("Alíquota Aplicada", f"{aliq_apuracao*100:.4f}%")
-            c4.metric("DAS CALCULADO", f"R$ {valor_das:,.2f}")
+            c3.metric("DAS TOTAL", f"R$ {valor_das_total:,.2f}")
+            c4.metric("Qtd Notas", len(df))
 
             # ─── MEMORIAL DE CÁLCULO ─────────────────────────────────────────
             st.markdown("### 📝 Memorial de Cálculo Detalhado")
@@ -135,25 +150,27 @@ def main():
                 <div class="memorial-box">
                     <b>1. DETERMINAÇÃO DA ALÍQUOTA (CNPJ: {cnpj_cli})</b><br>
                     • RBT12: <span class="highlight">R$ {rbt12:,.2f}</span><br>
-                    • Alíquota Nominal: 7,30% | Parcela a Deduzir: R$ 5.940,00<br>
-                    • Alíquota Efetiva: {aliq_efetiva_cheia*100:.4f}%<br><br>
+                    • Alíquota Efetiva: {aliq_ef_view*100:.4f}% | Alíquota ST (Dedução 34%): {aliq_st_view*100:.4f}%<br><br>
                     
-                    <b>2. AJUSTE DE SUBSTITUIÇÃO TRIBUTÁRIA</b><br>
-                    • Dedução ICMS (34%): <span class="highlight">{aliq_apuracao*100:.4f}%</span><br><br>
+                    <b>2. CONSOLIDAÇÃO DA BASE</b><br>
+                    • Faturamento Bruto: R$ {fat_bruto:,.2f}<br>
+                    • Base Líquida (Saídas - Entradas): <b>R$ {base_liquida:,.2f}</b><br><br>
                     
-                    <b>3. CONSOLIDAÇÃO DA BASE</b><br>
-                    • Saídas: R$ {fat_bruto:,.2f} | Entradas: R$ {dev_bruto:,.2f}<br>
-                    • <b>Base Líquida: R$ {base_liquida:,.2f}</b><br><br>
-                    
-                    <b>4. APURAÇÃO FINAL</b><br>
-                    • R$ {base_liquida:,.2f} * {aliq_apuracao*100:.4f}% = <span class="highlight" style="font-size: 20px;">R$ {valor_das:,.2f}</span>
+                    <b>3. APURAÇÃO POR SEGREGAÇÃO</b><br>
+                    • DAS Calculado sobre Notas de Saída: <span class="highlight" style="font-size: 20px;">R$ {valor_das_total:,.2f}</span>
                 </div>
             """, unsafe_allow_html=True)
+
+            # Resumo por CFOP para conferência
+            st.markdown("### 📋 Resumo por CFOP")
+            resumo = df_saida.groupby('CFOP').agg({'Valor (vNF)': 'sum', 'ST': 'first'}).reset_index()
+            resumo['Alíquota'] = resumo['ST'].apply(lambda x: f"{aliq_st*100:.6f}%" if x else f"{aliq_efetiva_cheia*100:.6f}%")
+            st.table(resumo[['CFOP', 'Valor (vNF)', 'Alíquota']])
 
             st.markdown("### 📋 Rastreabilidade nota a nota")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.error(f"❌ Nenhuma nota do CNPJ {cnpj_cli} foi encontrada nos arquivos enviados.")
+            st.error(f"❌ Nenhuma nota do CNPJ {cnpj_cli} foi encontrada.")
 
 if __name__ == "__main__":
     main()
