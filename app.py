@@ -66,14 +66,12 @@ def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente):
                 cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
                 csosn = det.find(f".//{ns}CSOSN")
                 
-                # Classificação por item para o resumo de CFOP
                 is_st = (csosn is not None and csosn.text == "500") or cfop in CFOPS_ST
                 regs.append({
                     "Nota": n_nota, "Tipo": "SAÍDA", "CFOP": cfop, 
                     "Valor": v_prod, "ST": is_st, "Chave": chave
                 })
             chaves_vistas.add(chave)
-
         elif dest_cnpj == cnpj_cliente and tipo_op == "0":
             for det in inf.findall(f"{ns}det"):
                 cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
@@ -90,7 +88,7 @@ def extrair_dados(conteudo, chaves_vistas, chaves_canc, cnpj_cliente):
 # ─── INTERFACE PRINCIPAL ─────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria com Resumo CFOP")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria com Subtração de ST")
     
     with st.sidebar:
         st.header("👤 Cliente")
@@ -135,45 +133,39 @@ def main():
             aliq_ef = ((rbt12 * aliq_nom) - ded) / rbt12 if rbt12 > 0 else aliq_nom
             aliq_st = (aliq_ef * (Decimal("1.0") - p_icms)).quantize(Decimal("0.000001"), ROUND_HALF_UP)
             
-            # Agrupamento para o Resumo por CFOP
+            # Resumo por CFOP
             df_cfop = df.groupby(['CFOP', 'ST', 'Tipo']).agg({'Valor': 'sum'}).reset_index()
-            df_cfop['Alíquota'] = df_cfop.apply(lambda x: aliq_st if x['ST'] else (Decimal("0") if x['Tipo'] == "DEVOLUÇÃO" else aliq_ef), axis=1)
-            df_cfop['Imposto'] = (df_cfop['Valor'] * df_cfop['Alíquota']).apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
             
-            t_das = df_cfop['Imposto'].sum()
+            # Cálculo de Imposto segregado
+            def calc_imp(row):
+                if row['Tipo'] == "DEVOLUÇÃO": return Decimal("0")
+                return (row['Valor'] * aliq_st) if row['ST'] else (row['Valor'] * aliq_ef)
 
+            df_cfop['Imposto'] = df_cfop.apply(calc_imp, axis=1).apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
+            
             # DASHBOARD
             st.markdown("### 📊 Dashboard Analítico")
+            total_geral = df[df['Tipo']=='SAÍDA']['Valor'].sum()
+            total_st = df[(df['Tipo']=='SAÍDA') & (df['ST']==True)]['Valor'].sum()
+            base_normal = total_geral - total_st # Subtração solicitada
+            
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Nota Inicial/Final", f"{df['Nota'].min()} a {df['Nota'].max()}")
-            c2.metric("Faturamento Total", f"R$ {df[df['Tipo']=='SAÍDA']['Valor'].sum():,.2f}")
-            c3.metric("Canceladas Ignoradas", len(chaves_canc))
-            c4.metric("DAS TOTAL", f"R$ {t_das:,.2f}")
+            c1.metric("Faturamento Total", f"R$ {total_geral:,.2f}")
+            c2.metric("Base Normal (Deduzida)", f"R$ {base_normal:,.2f}")
+            c3.metric("Base ST", f"R$ {total_st:,.2f}")
+            c4.metric("DAS TOTAL", f"R$ {df_cfop['Imposto'].sum():,.2f}")
 
-            # MEMORIAL COM RESUMO POR CFOP
-            st.markdown("### 📝 Memorial de Cálculo com Resumo por CFOP")
+            # MEMORIAL
+            st.markdown("### 📝 Memorial com Segregação")
+            st.table(df_cfop[['CFOP', 'Tipo', 'ST', 'Valor', 'Imposto']])
+            
             st.markdown(f"""
             <div class="memorial-box">
-                <b>1. PARÂMETROS DA FAIXA {f_n}:</b><br>
-                • RBT12: R$ {rbt12:,.2f} | Efetiva Cheia: {aliq_ef*100:.4f}% | Efetiva c/ Abatimento ICMS: {aliq_st*100:.4f}%<br><br>
-                <b>2. RESUMO DE APURAÇÃO POR CFOP:</b>
+                • <b>Subtração de ST:</b> Do faturamento total de R$ {total_geral:,.2f}, foi subtraído R$ {total_st:,.2f} (ST) para tributação em separado.<br>
+                • <b>Imposto Apurado:</b> R$ {df_cfop['Imposto'].sum():,.2f}
             </div>
             """, unsafe_allow_html=True)
             
-            # Tabela de CFOP formatada
-            df_cfop_display = df_cfop.copy()
-            df_cfop_display['Alíquota'] = df_cfop_display['Alíquota'].apply(lambda x: f"{x*100:.4f}%")
-            df_cfop_display['Valor'] = df_cfop_display['Valor'].apply(lambda x: f"R$ {x:,.2f}")
-            df_cfop_display['Imposto'] = df_cfop_display['Imposto'].apply(lambda x: f"R$ {x:,.2f}")
-            st.table(df_cfop_display[['CFOP', 'Tipo', 'ST', 'Valor', 'Alíquota', 'Imposto']])
-
-            st.markdown(f"""
-            <div class="memorial-box">
-                • <b>TOTAL DAS APURADO: <span class="highlight">R$ {t_das:,.2f}</span></b>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("### 📋 Rastreabilidade nota a nota")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
             st.warning("⚠️ Nenhuma nota autorizada para este CNPJ encontrada.")
