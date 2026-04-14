@@ -1,14 +1,18 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Foco: Conciliação Analítica para conferência com PGDAS (Juarez Almeida)
+Foco: Conciliação Analítica com Divisão/Trava de CNPJ
 """
 
 import zipfile
 import io
+import re
 from xml.etree import ElementTree as ET
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
+
+# Precisão extrema para bater com o PGDAS
+getcontext().prec = 30 
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
@@ -26,12 +30,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── REGRAS FISCAIS (ANEXO I - COMÉRCIO) ─────────────────────────────────────
-# Percentual de ICMS na repartição da 2ª faixa do Anexo I é 34%
 PERC_ICMS_ANEXO_I = Decimal("0.34")
 
-# ─── PROCESSAMENTO XML ───────────────────────────────────────────────────────
+# ─── FUNÇÕES DE APOIO ────────────────────────────────────────────────────────
 
-def extrair_dados_xml(conteudo, chaves_vistas):
+def limpar_cnpj(cnpj):
+    """Remove caracteres não numéricos para comparação segura."""
+    return re.sub(r'\D', '', str(cnpj))
+
+def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     regs = []
     try:
         root = ET.fromstring(conteudo.lstrip())
@@ -42,6 +49,13 @@ def extrair_dados_xml(conteudo, chaves_vistas):
         chave = inf.attrib.get('Id', '')[3:]
         if not chave or chave in chaves_vistas: return []
         
+        # Leitura do Emitente para trava de CNPJ
+        emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
+        
+        # TRAVA DE CNPJ: Se o usuário definiu um CNPJ, ignora notas de terceiros
+        if cnpj_cliente and emit_cnpj != cnpj_cliente:
+            return []
+            
         n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text # 1=Saída, 0=Entrada
@@ -62,8 +76,12 @@ def main():
     st.title("🛡️ Sentinela - Memorial de Cálculo Analítico")
     
     with st.sidebar:
+        st.header("👤 Identificação")
+        cnpj_input = st.text_input("CNPJ do Cliente (Trava de Segurança)", value="52.980.554/0001-04")
+        cnpj_cli = limpar_cnpj(cnpj_input)
+        
         st.header("⚙️ Parâmetros PGDAS")
-        rbt12_raw = st.text_input("Faturamento Acumulado (RBT12)", value="", placeholder="Ex: 256852.76")
+        rbt12_raw = st.text_input("Faturamento Acumulado (RBT12)", value="", placeholder="Ex: 504403.47")
         
         try:
             rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0.00")
@@ -72,31 +90,29 @@ def main():
         st.info("Configurado para: Anexo I (Comércio)")
         is_st = st.toggle("Dedução de ICMS ST (34%)", value=True)
 
-    # ─── CÁLCULO DA ALÍQUOTA (FAIXA 2) ───────────────────────────────────────
-    # Alíquota Nominal: 7,30% | Parcela a Deduzir: R$ 5.940,00
+    # ─── CÁLCULO DA ALÍQUOTA (DINÂMICO) ──────────────────────────────────────
     aliq_nom = Decimal("0.073")
     deducao = Decimal("5940.00")
     
     if rbt12 > 0:
         aliq_efetiva_cheia = ((rbt12 * aliq_nom) - deducao) / rbt12
     else:
-        aliq_efetiva_cheia = Decimal("0.04") # Faixa 1 default
+        aliq_efetiva_cheia = Decimal("0.04")
 
-    # Aplicação da Dedução ST (ICMS)
     aliq_apuracao = aliq_efetiva_cheia
     if is_st:
         aliq_apuracao = aliq_efetiva_cheia * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
     
     aliq_apuracao = aliq_apuracao.quantize(Decimal("0.000001"), ROUND_HALF_UP)
 
-    # ─── DASHBOARD DE TOTAIS ─────────────────────────────────────────────────
+    # ─── PROCESSAMENTO ───────────────────────────────────────────────────────
     files = st.file_uploader("Upload XMLs para Auditoria", accept_multiple_files=True, type=["xml"])
 
     if st.button("🚀 Gerar Memorial") and files:
         chaves_vistas = set()
         registros = []
         for f in files:
-            registros.extend(extrair_dados_xml(f.read(), chaves_vistas))
+            registros.extend(extrair_dados_xml(f.read(), chaves_vistas, cnpj_cli))
         
         if registros:
             df = pd.DataFrame(registros)
@@ -115,33 +131,29 @@ def main():
 
             # ─── MEMORIAL DE CÁLCULO ─────────────────────────────────────────
             st.markdown("### 📝 Memorial de Cálculo Detalhado")
-            
-            with st.container():
-                st.markdown(f"""
+            st.markdown(f"""
                 <div class="memorial-box">
-                    <b>1. DETERMINAÇÃO DA ALÍQUOTA (PGDAS PÁGINA 1)</b><br>
-                    • RBT12 (Últimos 12 meses): <span class="highlight">R$ {rbt12:,.2f}</span><br>
-                    • Alíquota Nominal (Anexo I - Faixa 2): 7,30%<br>
-                    • Parcela a Deduzir: R$ 5.940,00<br>
-                    • Alíquota Efetiva Cheia: (({rbt12} * 0,073) - 5940) / {rbt12} = <b>{aliq_efetiva_cheia*100:.4f}%</b><br><br>
+                    <b>1. DETERMINAÇÃO DA ALÍQUOTA (CNPJ: {cnpj_cli})</b><br>
+                    • RBT12: <span class="highlight">R$ {rbt12:,.2f}</span><br>
+                    • Alíquota Nominal: 7,30% | Parcela a Deduzir: R$ 5.940,00<br>
+                    • Alíquota Efetiva: {aliq_efetiva_cheia*100:.4f}%<br><br>
                     
-                    <b>2. AJUSTE DE SUBSTITUIÇÃO TRIBUTÁRIA (ICMS ST)</b><br>
-                    • Percentual de ICMS na Repartição: 34,00%<br>
-                    • Alíquota Final (Sem ICMS): {aliq_efetiva_cheia*100:.4f}% * (1 - 0,34) = <span class="highlight">{aliq_apuracao*100:.4f}%</span><br><br>
+                    <b>2. AJUSTE DE SUBSTITUIÇÃO TRIBUTÁRIA</b><br>
+                    • Dedução ICMS (34%): <span class="highlight">{aliq_apuracao*100:.4f}%</span><br><br>
                     
-                    <b>3. CONSOLIDAÇÃO DA BASE DE CÁLCULO (XML)</b><br>
-                    • Soma das Notas de Saída (vNF): R$ {fat_bruto:,.2f}<br>
-                    • (-) Soma das Devoluções: R$ {dev_bruto:,.2f}<br>
-                    • <b>Base de Cálculo Líquida: R$ {base_liquida:,.2f}</b><br><br>
+                    <b>3. CONSOLIDAÇÃO DA BASE</b><br>
+                    • Saídas: R$ {fat_bruto:,.2f} | Entradas: R$ {dev_bruto:,.2f}<br>
+                    • <b>Base Líquida: R$ {base_liquida:,.2f}</b><br><br>
                     
                     <b>4. APURAÇÃO FINAL</b><br>
                     • R$ {base_liquida:,.2f} * {aliq_apuracao*100:.4f}% = <span class="highlight" style="font-size: 20px;">R$ {valor_das:,.2f}</span>
                 </div>
-                """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
-            # ─── LISTAGEM PARA CONFERÊNCIA ───────────────────────────────────
             st.markdown("### 📋 Rastreabilidade nota a nota")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
+        else:
+            st.error(f"❌ Nenhuma nota do CNPJ {cnpj_cli} foi encontrada nos arquivos enviados.")
 
 if __name__ == "__main__":
     main()
