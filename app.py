@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão extrema para bater com o PGDAS (13 casas)
+# Precisão extrema para bater com o PGDAS (13 casas decimais)
 getcontext().prec = 30 
 
 # ─── ESTILO RIHANNA / MONTSERRAT ─────────────────────────────────────────────
@@ -24,7 +24,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ─── REGRAS FISCAIS (ANEXO I) ────────────────────────────────────────────────
+# ─── REGRAS FISCAIS UNIVERSAIS (ANEXO I) ─────────────────────────────────────
 TABELAS_SIMPLES = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3400")),
@@ -36,9 +36,20 @@ CFOPS_DEVOLUCAO = {"1201", "1202", "1410", "1411", "2201", "2202", "2410", "2411
 # ─── FUNÇÕES DE AUDITORIA ────────────────────────────────────────────────────
 
 def limpar_cnpj(cnpj):
+    """Garante comparação numérica pura."""
     return re.sub(r'\D', '', str(cnpj))
 
-def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
+def identificar_cancelamento(conteudo):
+    """Detecta eventos de cancelamento para expurgar notas."""
+    try:
+        root = ET.fromstring(conteudo.lstrip())
+        for ev in root.iter():
+            if "tpEvento" in ev.tag and ev.text == "110111":
+                ch = root.find(".//{http://www.portalfiscal.inf.br/nfe}chNFe")
+                return ch.text if ch is not None else None
+    except: return None
+
+def extrair_dados_xml(conteudo, chaves_vistas, chaves_canc, cnpj_cliente):
     regs = []
     try:
         xml_str = conteudo.decode('utf-8', errors='ignore')
@@ -50,31 +61,29 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         if inf is None: return []
         
         chave = inf.attrib.get('Id', '')[3:]
-        if not chave or chave in chaves_vistas: return []
+        if not chave or chave in chaves_vistas or chave in chaves_canc: return []
         
-        emit_node = inf.find(f"{ns}emit/{ns}CNPJ")
-        emit_cnpj = limpar_cnpj(emit_node.text) if emit_node is not None else ""
+        emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
         
-        # Filtro de CNPJ inteligente
         if cnpj_cliente and emit_cnpj != cnpj_cliente:
             return []
 
         n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
-        tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text # 1=Saída, 0=Entrada
+        tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
 
         for det in inf.findall(f"{ns}det"):
+            # FOCO NO VALOR DO PRODUTO (vProd) PARA BATER COM O SISTEMA
             v_prod = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
             cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
             csosn = det.find(f".//{ns}CSOSN")
             
-            # Identifica ST pelo CFOP ou CSOSN 500
             is_st = (csosn is not None and csosn.text == "500") or cfop in CFOPS_ST
             
             regs.append({
                 "Nota": n_nota,
                 "Tipo": "SAÍDA" if tipo_op == "1" else "DEVOLUÇÃO",
                 "CFOP": cfop,
-                "Valor Tributável": v_prod, # FOCO NO VALOR DO PRODUTO, NÃO DA NOTA
+                "Valor Tributável": v_prod,
                 "ST": is_st,
                 "Chave": chave
             })
@@ -85,40 +94,45 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Auditoria com Faturamento de Itens")
+    st.title("🛡️ Sentinela - Auditoria com Faturamento por Item")
     
     with st.sidebar:
         st.header("👤 Cliente")
-        cnpj_input = st.text_input("CNPJ do Cliente", value="52.980.554/0001-04")
+        cnpj_input = st.text_input("CNPJ do Cliente (Ex: 52.980.554/0001-04)")
         cnpj_cli = limpar_cnpj(cnpj_input)
         
         st.header("⚙️ PGDAS")
-        rbt12_raw = st.text_input("RBT12 Acumulado", value="504.403,47")
+        rbt12_raw = st.text_input("RBT12 Acumulado")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
 
     files = st.file_uploader("Upload XML ou ZIP", accept_multiple_files=True, type=["xml", "zip"])
 
-    if st.button("🚀 Iniciar Auditoria"):
-        chaves_vistas = set()
-        bytes_list = []
+    if st.button("🚀 Iniciar Auditoria") and cnpj_cli:
+        chaves_vistas, chaves_canc, bytes_list = set(), set(), []
         
+        # Processamento de arquivos (ZIP/XML)
         for f in files:
             content = f.read()
             if f.name.lower().endswith('.zip'):
                 with zipfile.ZipFile(io.BytesIO(content)) as z:
                     for n in z.namelist():
-                        bytes_list.append(z.read(n))
+                        c = z.read(n)
+                        canc = identificar_cancelamento(c)
+                        if canc: chaves_canc.add(canc)
+                        bytes_list.append(c)
             else:
+                canc = identificar_cancelamento(content)
+                if canc: chaves_canc.add(canc)
                 bytes_list.append(content)
 
         registros = []
         for b in bytes_list:
-            registros.extend(extrair_dados_xml(b, chaves_vistas, cnpj_cli))
+            registros.extend(extrair_dados_xml(b, chaves_vistas, chaves_canc, cnpj_cli))
         
         if registros:
             df = pd.DataFrame(registros)
             
-            # Cálculo de Alíquotas Dinâmico (13 casas)
+            # Cálculo de Alíquotas Dinâmico (PGDAS Precisão)
             aliq_nom, ded, f_n, p_icms = Decimal("0.095"), Decimal("13860.00"), 3, Decimal("0.335")
             for num, ini, fim, nom, d_val, p_val in TABELAS_SIMPLES:
                 if rbt12 <= fim:
@@ -129,36 +143,40 @@ def main():
             aliq_ef = aliq_ef.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             aliq_st = (aliq_ef * (Decimal("1.0") - p_icms)).quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
             
-            # Totais Analíticos
-            receita_bruta_total = df[df['Tipo'] == "SAÍDA"]['Valor Tributável'].sum()
-            receita_st = df[(df['Tipo'] == "SAÍDA") & (df['ST'] == True)]['Valor Tributável'].sum()
-            receita_normal = receita_bruta_total - receita_st
+            # Totais
+            fat_bruto = df[df['Tipo'] == "SAÍDA"]['Valor Tributável'].sum()
+            val_st_total = df[(df['Tipo'] == "SAÍDA") & (df['ST'] == True)]['Valor Tributável'].sum()
             
-            # Resumo CFOP
-            resumo = []
+            # Resumo CFOP com Subtração Real
+            resumo_cfop = []
             for cfop in df['CFOP'].unique():
                 sub = df[df['CFOP'] == cfop]
-                v_bruto = sub['Valor Tributável'].sum()
-                st_flag = sub['ST'].any()
                 tp = sub['Tipo'].iloc[0]
+                is_st = sub['ST'].any()
+                v_bruto = sub['Valor Tributável'].sum()
                 
-                # Alíquota específica
-                aliq = aliq_st if st_flag else (Decimal("0") if tp == "DEVOLUÇÃO" else aliq_ef)
-                imp = (v_bruto * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                # Dedução da base normal pelo montante de ST do lote
+                v_liq = v_bruto - val_st_total if (not is_st and tp == "SAÍDA") else v_bruto
+                aliq = aliq_st if is_st else (Decimal("0") if tp == "DEVOLUÇÃO" else aliq_ef)
+                imp = (v_liq * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
-                resumo.append({"CFOP": cfop, "Tipo": tp, "Faturamento": v_bruto, "Alíquota": f"{aliq*100:.13f}%", "Imposto": imp})
+                resumo_cfop.append({
+                    "CFOP": cfop, "Tipo": tp, "ST": is_st, 
+                    "Valor Bruto": v_bruto, "Base Líquida": v_liq, 
+                    "Alíquota": f"{aliq*100:.13f}%", "Imposto": imp
+                })
 
-            st.markdown("### 📊 Dashboard de Faturamento Real")
+            st.markdown("### 📊 Dashboard de Faturamento")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Receita Bruta Total", f"R$ {receita_bruta_total:,.2f}")
-            c2.metric("Receita Normal", f"R$ {receita_normal:,.2f}")
-            c3.metric("Receita ICMS ST", f"R$ {receita_st:,.2f}")
-            c4.metric("DAS TOTAL", f"R$ {sum(r['Imposto'] for r in resumo):,.2f}")
+            c1.metric("Receita Bruta Total", f"R$ {fat_bruto:,.2f}")
+            c2.metric("Base Normal Líquida", f"R$ {fat_bruto - val_st_total:,.2f}")
+            c3.metric("Base ICMS ST", f"R$ {val_st_total:,.2f}")
+            c4.metric("DAS TOTAL", f"R$ {sum(r['Imposto'] for r in resumo_cfop):,.2f}")
 
-            st.table(pd.DataFrame(resumo))
-            st.dataframe(df.sort_values("Nota"), use_container_width=True)
+            st.table(pd.DataFrame(resumo_cfop))
+            st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.error("Nenhuma nota tributável encontrada para o CNPJ informado.")
+            st.error("Nenhuma nota tributável encontrada. Verifique o CNPJ.")
 
 if __name__ == "__main__":
     main()
