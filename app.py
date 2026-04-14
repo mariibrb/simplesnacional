@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Foco: Conciliação Analítica com Divisão/Trava de CNPJ
+Foco: Resumo por CFOP de emissão própria sem alteração do valor total (vNF).
 """
 
 import zipfile
@@ -29,13 +29,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ─── REGRAS FISCAIS (ANEXO I - COMÉRCIO) ─────────────────────────────────────
+# ─── REGRAS FISCAIS ──────────────────────────────────────────────────────────
 PERC_ICMS_ANEXO_I = Decimal("0.34")
+CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404"}
 
 # ─── FUNÇÕES DE APOIO ────────────────────────────────────────────────────────
 
 def limpar_cnpj(cnpj):
-    """Remove caracteres não numéricos para comparação segura."""
     return re.sub(r'\D', '', str(cnpj))
 
 def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
@@ -49,20 +49,25 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         chave = inf.attrib.get('Id', '')[3:]
         if not chave or chave in chaves_vistas: return []
         
-        # Leitura do Emitente para trava de CNPJ
+        # Filtro de CNPJ para Emissão Própria
         emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
-        
-        # TRAVA DE CNPJ: Se o usuário definiu um CNPJ, ignora notas de terceiros
         if cnpj_cliente and emit_cnpj != cnpj_cliente:
             return []
             
         n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
-        tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text # 1=Saída, 0=Entrada
+        tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
+        
+        # Pega o CFOP principal da nota (da primeira linha de detalhe)
+        # Mantendo a leitura do valor TOTAL da nota (vNF) para não errar a base
+        det_1 = inf.find(f"{ns}det")
+        cfop_principal = det_1.find(f"{ns}prod/{ns}CFOP").text.replace(".", "") if det_1 is not None else "0000"
         
         regs.append({
             "Nota": n_nota,
             "Tipo": "SAÍDA" if tipo_op == "1" else "ENTRADA",
+            "CFOP": cfop_principal,
+            "ST": cfop_principal in CFOPS_ST,
             "Valor (vNF)": v_nf,
             "Chave": chave
         })
@@ -73,40 +78,27 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Memorial de Cálculo Analítico")
+    st.title("🛡️ Sentinela - Resumo por CFOP (Base vNF)")
     
     with st.sidebar:
         st.header("👤 Identificação")
-        cnpj_input = st.text_input("CNPJ do Cliente (Trava de Segurança)", value="52.980.554/0001-04")
+        cnpj_input = st.text_input("CNPJ do Cliente", value="52.980.554/0001-04")
         cnpj_cli = limpar_cnpj(cnpj_input)
         
-        st.header("⚙️ Parâmetros PGDAS")
-        rbt12_raw = st.text_input("Faturamento Acumulado (RBT12)", value="", placeholder="Ex: 504403.47")
-        
+        st.header("⚙️ PGDAS")
+        rbt12_raw = st.text_input("RBT12", value="504.403,47")
         try:
             rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0.00")
         except: rbt12 = Decimal("0.00")
         
-        st.info("Configurado para: Anexo I (Comércio)")
-        is_st = st.toggle("Dedução de ICMS ST (34%)", value=True)
+        is_st_toggle = st.toggle("Dedução de ICMS ST (34%)", value=True)
 
-    # ─── CÁLCULO DA ALÍQUOTA (DINÂMICO) ──────────────────────────────────────
-    aliq_nom = Decimal("0.073")
-    deducao = Decimal("5940.00")
-    
-    if rbt12 > 0:
-        aliq_efetiva_cheia = ((rbt12 * aliq_nom) - deducao) / rbt12
-    else:
-        aliq_efetiva_cheia = Decimal("0.04")
+    # Cálculo de Alíquotas
+    aliq_nom, deducao = Decimal("0.073"), Decimal("5940.00")
+    aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else Decimal("0.04")
+    aliq_st = aliq_efetiva * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
 
-    aliq_apuracao = aliq_efetiva_cheia
-    if is_st:
-        aliq_apuracao = aliq_efetiva_cheia * (Decimal("1.0") - PERC_ICMS_ANEXO_I)
-    
-    aliq_apuracao = aliq_apuracao.quantize(Decimal("0.000001"), ROUND_HALF_UP)
-
-    # ─── PROCESSAMENTO ───────────────────────────────────────────────────────
-    files = st.file_uploader("Upload XMLs para Auditoria", accept_multiple_files=True, type=["xml"])
+    files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"])
 
     if st.button("🚀 Gerar Memorial") and files:
         chaves_vistas = set()
@@ -116,44 +108,32 @@ def main():
         
         if registros:
             df = pd.DataFrame(registros)
-            fat_bruto = df[df["Tipo"] == "SAÍDA"]["Valor (vNF)"].sum()
-            dev_bruto = df[df["Tipo"] == "ENTRADA"]["Valor (vNF)"].sum()
-            base_liquida = max(fat_bruto - dev_bruto, Decimal("0.00"))
             
-            valor_das = (base_liquida * aliq_apuracao).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            # Dashboard (Faturamento Total vNF)
+            df_saida = df[df["Tipo"] == "SAÍDA"].copy()
+            fat_total = df_saida["Valor (vNF)"].sum()
+            
+            # Cálculo do DAS Individual (Nota a Nota)
+            df_saida['Aliq'] = df_saida['ST'].apply(lambda x: aliq_st if is_st_toggle and x else aliq_efetiva)
+            df_saida['DAS'] = df_saida.apply(lambda r: (r['Valor (vNF)'] * r['Aliq']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
 
-            st.markdown("### 📊 Dashboard de Conciliação")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Faturamento (vNF)", f"R$ {fat_bruto:,.2f}")
-            c2.metric("Base Líquida", f"R$ {base_liquida:,.2f}")
-            c3.metric("Alíquota Aplicada", f"{aliq_apuracao*100:.4f}%")
-            c4.metric("DAS CALCULADO", f"R$ {valor_das:,.2f}")
+            st.markdown("### 📊 Dashboard de Apuração")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Faturamento (vNF)", f"R$ {fat_total:,.2f}")
+            c2.metric("DAS Total", f"R$ {df_saida['DAS'].sum():,.2f}")
+            c3.metric("Notas Processadas", len(df_saida))
 
-            # ─── MEMORIAL DE CÁLCULO ─────────────────────────────────────────
-            st.markdown("### 📝 Memorial de Cálculo Detalhado")
-            st.markdown(f"""
-                <div class="memorial-box">
-                    <b>1. DETERMINAÇÃO DA ALÍQUOTA (CNPJ: {cnpj_cli})</b><br>
-                    • RBT12: <span class="highlight">R$ {rbt12:,.2f}</span><br>
-                    • Alíquota Nominal: 7,30% | Parcela a Deduzir: R$ 5.940,00<br>
-                    • Alíquota Efetiva: {aliq_efetiva_cheia*100:.4f}%<br><br>
-                    
-                    <b>2. AJUSTE DE SUBSTITUIÇÃO TRIBUTÁRIA</b><br>
-                    • Dedução ICMS (34%): <span class="highlight">{aliq_apuracao*100:.4f}%</span><br><br>
-                    
-                    <b>3. CONSOLIDAÇÃO DA BASE</b><br>
-                    • Saídas: R$ {fat_bruto:,.2f} | Entradas: R$ {dev_bruto:,.2f}<br>
-                    • <b>Base Líquida: R$ {base_liquida:,.2f}</b><br><br>
-                    
-                    <b>4. APURAÇÃO FINAL</b><br>
-                    • R$ {base_liquida:,.2f} * {aliq_apuracao*100:.4f}% = <span class="highlight" style="font-size: 20px;">R$ {valor_das:,.2f}</span>
-                </div>
-            """, unsafe_allow_html=True)
+            # RESUMO POR CFOP (Considerando apenas emissões próprias de saída)
+            st.markdown("### 📑 Resumo por CFOP (Emissões Próprias)")
+            resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor (vNF)': 'sum', 'DAS': 'sum'}).reset_index()
+            resumo['Tributação'] = resumo['ST'].apply(lambda x: "ICMS ST (Dedução 34%)" if x else "Normal")
+            
+            st.table(resumo[['CFOP', 'Tributação', 'Valor (vNF)', 'DAS']])
 
-            st.markdown("### 📋 Rastreabilidade nota a nota")
+            st.markdown("### 📋 Listagem Analítica")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.error(f"❌ Nenhuma nota do CNPJ {cnpj_cli} foi encontrada nos arquivos enviados.")
+            st.error(f"❌ Nenhuma nota do CNPJ {cnpj_cli} encontrada.")
 
 if __name__ == "__main__":
     main()
