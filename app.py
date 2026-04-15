@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Gestão de Cancelamentos
+Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas, Cancelamentos e Controle de Séries
 """
 
 import zipfile
@@ -33,7 +33,7 @@ CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
-# ─── ESTILIZAÇÃO ─────────────────────────────────────────────────────────────
+# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
 st.markdown("""
     <style>
@@ -56,16 +56,14 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         root = ET.fromstring(conteudo.lstrip())
         ns_nfe = "{http://www.portalfiscal.inf.br/nfe}"
         
-        # 1. DETECÇÃO DE EVENTO DE CANCELAMENTO
         if "procEventoNFe" in root.tag or "eventoNFe" in root.tag:
             inf_evento = root.find(f".//{ns_nfe}infEvento")
             tp_evento = inf_evento.find(f"{ns_nfe}tpEvento").text
-            if tp_evento == "110111": # Código de Cancelamento
+            if tp_evento == "110111": 
                 ch_canc = inf_evento.find(f"{ns_nfe}chNFe").text
                 chaves_canceladas.add(ch_canc)
             return []
 
-        # 2. PROCESSAMENTO DE NOTA FISCAL
         inf = root.find(f".//{ns_nfe}infNFe")
         if inf is None: return []
         
@@ -96,6 +94,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, 
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
                 "Valor_Produto_XML": v_p, "Valor_Proporcional_NF": v_nf * prop,
+                "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": "RECEITA BRUTA" if tp_nf == "1" else ("DEVOLUÇÃO VENDA" if cfop in CFOPS_DEVOLUCAO_VENDA else "OUTROS"),
                 "Chave": chave
             })
@@ -120,7 +119,7 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cl
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Integral com Cancelamentos")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -134,7 +133,7 @@ def main():
             st.session_state.reset_key += 1
             st.rerun()
 
-    files = st.file_uploader("Upload XMLs/ZIPs (Vendas + Cancelamentos)", accept_multiple_files=True, type=["xml", "zip"], key=f"f_{st.session_state.reset_key}")
+    files = st.file_uploader("Upload XMLs/ZIPs", accept_multiple_files=True, type=["xml", "zip"], key=f"f_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and files:
         chaves_vistas, chaves_canceladas, regs = set(), set(), []
@@ -143,19 +142,25 @@ def main():
         
         if regs:
             df = pd.DataFrame(regs)
-            
-            # APLICAÇÃO DO FILTRO DE CANCELADAS
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
-            # Notas canceladas têm valor zerado para faturamento
             df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Valor_Proporcional_NF']] = Decimal("0")
 
+            # ─── NOVO RESUMO POR TIPO E SÉRIE (RESTAURADO) ──────────────────
+            st.subheader("📊 Resumo de Continuidade (Por Tipo e Série)")
+            resumo_series = df.groupby(['Tipo', 'Modelo', 'Série']).agg(
+                Nota_Inicial=('Nota', 'min'),
+                Nota_Final=('Nota', 'max'),
+                Qtd_Notas=('Nota', 'nunique')
+            ).reset_index()
+            st.table(resumo_series)
+
+            # ─── MEMORIAL FISCAL ────────────────────────────────────────────
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def aplicar_logica_fiscal(row):
                 base_calculo = row['Valor_Proporcional_NF'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 multiplicador = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
                 
-                # Cálculo de alíquotas conforme Anexo
                 tabela = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
                 aliq_nom, deducao, p_icms = tabela[0][3], tabela[0][4], tabela[0][5]
                 for _, ini, fim, nom, ded, p_ic in tabela:
@@ -164,28 +169,30 @@ def main():
                 aliq_ef = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else aliq_nom
                 aliq_final = aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
                 
-                return base_calculo * multiplicador, aliq_final, (base_calculo * multiplicador * aliq_final).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                xml_bruto_sinal = (row['Valor_Produto_XML'] * multiplicador).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                
+                return base_calculo * multiplicador, aliq_final, (base_calculo * multiplicador * aliq_final).quantize(Decimal("0.01"), ROUND_HALF_UP), xml_bruto_sinal
 
             calc_data = df_fiscal.apply(aplicar_logica_fiscal, axis=1, result_type='expand')
-            df_fiscal['Base_Liquida'], df_fiscal['Aliq_Final'], df_fiscal['DAS'] = calc_data[0], calc_data[1], calc_data[2]
+            df_fiscal['Base_Liquida'], df_fiscal['Aliq_Final'], df_fiscal['DAS'], df_fiscal['XML_Bruto_Sinal'] = calc_data[0], calc_data[1], calc_data[2], calc_data[3]
 
-            st.subheader("📊 Resumo Analítico por CFOP (Cancelamentos Processados)")
-            resumo = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'Valor_Produto_XML': 'sum', 'Base_Liquida': 'sum', 'DAS': 'sum', 'Aliq_Final': 'first'
+            st.subheader("📑 Resumo Analítico por CFOP")
+            resumo_cfop = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
+                'XML_Bruto_Sinal': 'sum', 'Base_Liquida': 'sum', 'DAS': 'sum', 'Aliq_Final': 'first'
             }).reset_index()
-            
-            resumo['Alíquota (%)'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
-            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Valor_Produto_XML', 'Base_Liquida', 'DAS']])
+            resumo_cfop['Alíquota (%)'] = resumo_cfop['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
+            st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'XML_Bruto_Sinal', 'Base_Liquida', 'DAS']])
 
             st.markdown("---")
             c1, c2, c3 = st.columns(3)
-            c1.metric("XML Bruto Total", f"R$ {df_fiscal['Valor_Produto_XML'].sum():,.2f}")
+            c1.metric("XML Bruto Total", f"R$ {df_fiscal['XML_Bruto_Sinal'].sum():,.2f}")
             c2.metric("Base PGDAS Líquida", f"R$ {df_fiscal['Base_Liquida'].sum():,.2f}")
             c3.metric("Total DAS", f"R$ {df_fiscal['DAS'].sum():,.2f}")
 
-            st.dataframe(df_fiscal[['Nota', 'Série', 'CFOP', 'Valor_Produto_XML', 'Base_Liquida', 'Cancelada', 'Chave']], use_container_width=True)
+            st.subheader("📋 Rastreabilidade Geral")
+            st.dataframe(df_fiscal[['Nota', 'Série', 'Modelo', 'Tipo', 'CFOP', 'XML_Bruto_Sinal', 'Base_Liquida', 'Cancelada', 'Chave']], use_container_width=True)
         else:
-            st.error("Nenhuma nota ou cancelamento processado.")
+            st.error("Nenhuma nota processada. Verifique se o CNPJ do emissor nos XMLs coincide com o informado.")
 
 if __name__ == "__main__":
     main()
