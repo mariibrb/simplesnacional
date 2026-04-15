@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas, Cancelamentos e Controle de Séries
+Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Base de Cálculo Fixa vProd
 """
 
 import zipfile
@@ -74,28 +74,23 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         dest_node = inf.find(f"{ns_nfe}dest/{ns_nfe}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
-        # FILTRO DE SEGURANÇA: Só entra nota onde o cliente é o EMISSOR (Venda) 
-        # ou DESTINATÁRIO em caso de Devolução (Entrada Própria)
         if cnpj_cliente and (emit_cnpj != cnpj_cliente and dest_cnpj != cnpj_cliente):
             return []
             
         ide = inf.find(f"{ns_nfe}ide")
         n_nota, serie, modelo = int(ide.find(f"{ns_nfe}nNF").text), ide.find(f"{ns_nfe}serie").text, ide.find(f"{ns_nfe}mod").text
-        tp_nf, v_nf = ide.find(f"{ns_nfe}tpNF").text, Decimal(inf.find(f"{ns_nfe}total/{ns_nfe}ICMSTot/{ns_nfe}vNF").text)
+        tp_nf = ide.find(f"{ns_nfe}tpNF").text 
 
-        dets = inf.findall(f"{ns_nfe}det")
-        v_prod_total = sum(Decimal(d.find(f"{ns_nfe}prod/{ns_nfe}vProd").text) for d in dets)
-
-        for det in dets:
+        for det in inf.findall(f"{ns_nfe}det"):
             v_p = Decimal(det.find(f"{ns_nfe}prod/{ns_nfe}vProd").text)
             cfop = det.find(f"{ns_nfe}prod/{ns_nfe}CFOP").text.replace(".", "")
-            prop = v_p / v_prod_total if v_prod_total > 0 else Decimal("0")
             
+            # AJUSTE CRÍTICO: Base de Cálculo agora é EXATAMENTE o vProd
             regs.append({
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, 
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "Valor_Produto_XML": v_p, "Valor_Proporcional_NF": v_nf * prop,
+                "Valor_Produto_XML": v_p, 
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": "RECEITA BRUTA" if tp_nf == "1" else ("DEVOLUÇÃO VENDA" if cfop in CFOPS_DEVOLUCAO_VENDA else "OUTROS"),
                 "Chave": chave
@@ -143,10 +138,10 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
-            df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Valor_Proporcional_NF']] = Decimal("0")
+            df.loc[df['Cancelada'], 'Valor_Produto_XML'] = Decimal("0")
 
             # Resumo de Continuidade
-            st.subheader("📊 Resumo de Continuidade (Por Tipo e Série)")
+            st.subheader("📊 Resumo de Continuidade")
             resumo_series = df.groupby(['Tipo', 'Modelo', 'Série']).agg(
                 Nota_Inicial=('Nota', 'min'), Nota_Final=('Nota', 'max'), Qtd_Notas=('Nota', 'nunique')
             ).reset_index()
@@ -156,8 +151,9 @@ def main():
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def aplicar_logica_fiscal(row):
-                base_calculo = row['Valor_Proporcional_NF'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 multiplicador = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
+                # Base de Cálculo é estritamente o valor do produto agora
+                base_final = (row['Valor_Produto_XML'] * multiplicador).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
                 tabela = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
                 aliq_nom, deducao, p_icms = tabela[0][3], tabela[0][4], tabela[0][5]
@@ -167,28 +163,29 @@ def main():
                 aliq_ef = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else aliq_nom
                 aliq_final = aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
                 
-                xml_bruto_sinal = (row['Valor_Produto_XML'] * multiplicador).quantize(Decimal("0.01"), ROUND_HALF_UP)
-                
-                return base_calculo * multiplicador, aliq_final, (base_calculo * multiplicador * aliq_final).quantize(Decimal("0.01"), ROUND_HALF_UP), xml_bruto_sinal
+                return base_final, aliq_final, (base_final * aliq_final).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
             calc_data = df_fiscal.apply(aplicar_logica_fiscal, axis=1, result_type='expand')
-            df_fiscal['Base_Liquida'], df_fiscal['Aliq_Final'], df_fiscal['DAS'], df_fiscal['XML_Bruto_Sinal'] = calc_data[0], calc_data[1], calc_data[2], calc_data[3]
+            df_fiscal['Base_Calculo'], df_fiscal['Aliq_Final'], df_fiscal['DAS'] = calc_data[0], calc_data[1], calc_data[2]
 
             st.subheader("📑 Resumo Analítico por CFOP")
             resumo_cfop = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'XML_Bruto_Sinal': 'sum', 'Base_Liquida': 'sum', 'DAS': 'sum', 'Aliq_Final': 'first'
+                'Valor_Produto_XML': 'sum', 'Base_Calculo': 'sum', 'DAS': 'sum', 'Aliq_Final': 'first'
             }).reset_index()
             resumo_cfop['Alíquota (%)'] = resumo_cfop['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
-            st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'XML_Bruto_Sinal', 'Base_Liquida', 'DAS']])
+            
+            # Ajuste de sinal visual para o XML Bruto no resumo
+            resumo_cfop['XML_Bruto_Show'] = resumo_cfop.apply(lambda x: x['Valor_Produto_XML'] * -1 if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Valor_Produto_XML'], axis=1)
+            
+            st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'XML_Bruto_Show', 'Base_Calculo', 'DAS']])
 
             st.markdown("---")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("XML Bruto Total", f"R$ {df_fiscal['XML_Bruto_Sinal'].sum():,.2f}")
-            c2.metric("Base PGDAS Líquida", f"R$ {df_fiscal['Base_Liquida'].sum():,.2f}")
-            c3.metric("Total DAS", f"R$ {df_fiscal['DAS'].sum():,.2f}")
+            c1, c2 = st.columns(2)
+            c1.metric("Base PGDAS Líquida (vProd)", f"R$ {df_fiscal['Base_Calculo'].sum():,.2f}")
+            c2.metric("Total DAS", f"R$ {df_fiscal['DAS'].sum():,.2f}")
 
             st.subheader("📋 Rastreabilidade Geral")
-            st.dataframe(df_fiscal[['Nota', 'Série', 'Modelo', 'Tipo', 'CFOP', 'XML_Bruto_Sinal', 'Base_Liquida', 'Cancelada', 'Chave']], use_container_width=True)
+            st.dataframe(df_fiscal[['Nota', 'Série', 'Modelo', 'CFOP', 'Base_Calculo', 'Cancelada', 'Chave']], use_container_width=True)
         else:
             st.error("Nenhuma nota processada.")
 
