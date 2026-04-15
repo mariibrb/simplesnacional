@@ -33,7 +33,7 @@ CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
-# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
+# ─── ESTILIZAÇÃO ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
 st.markdown("""
     <style>
@@ -74,6 +74,8 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         dest_node = inf.find(f"{ns_nfe}dest/{ns_nfe}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
+        # FILTRO DE SEGURANÇA: Só entra nota onde o cliente é o EMISSOR (Venda) 
+        # ou DESTINATÁRIO em caso de Devolução (Entrada Própria)
         if cnpj_cliente and (emit_cnpj != cnpj_cliente and dest_cnpj != cnpj_cliente):
             return []
             
@@ -116,8 +118,6 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cl
         registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cli))
     return registros
 
-# ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
-
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
     
@@ -145,16 +145,14 @@ def main():
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
             df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Valor_Proporcional_NF']] = Decimal("0")
 
-            # ─── NOVO RESUMO POR TIPO E SÉRIE (RESTAURADO) ──────────────────
+            # Resumo de Continuidade
             st.subheader("📊 Resumo de Continuidade (Por Tipo e Série)")
             resumo_series = df.groupby(['Tipo', 'Modelo', 'Série']).agg(
-                Nota_Inicial=('Nota', 'min'),
-                Nota_Final=('Nota', 'max'),
-                Qtd_Notas=('Nota', 'nunique')
+                Nota_Inicial=('Nota', 'min'), Nota_Final=('Nota', 'max'), Qtd_Notas=('Nota', 'nunique')
             ).reset_index()
             st.table(resumo_series)
 
-            # ─── MEMORIAL FISCAL ────────────────────────────────────────────
+            # Memorial Fiscal
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def aplicar_logica_fiscal(row):
@@ -192,7 +190,7 @@ def main():
             st.subheader("📋 Rastreabilidade Geral")
             st.dataframe(df_fiscal[['Nota', 'Série', 'Modelo', 'Tipo', 'CFOP', 'XML_Bruto_Sinal', 'Base_Liquida', 'Cancelada', 'Chave']], use_container_width=True)
         else:
-            st.error("Nenhuma nota processada. Verifique se o CNPJ do emissor nos XMLs coincide com o informado.")
+            st.error("Nenhuma nota processada.")
 
 if __name__ == "__main__":
     main()
