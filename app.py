@@ -1,7 +1,7 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
 Foco: Cálculo Automático de Alíquotas PGDAS (13 Casas) e Base vNF Proporcional
-Incluso: Detecção de Intervalo de Notas (Primeira e Última)
+Incluso: Detecção de Intervalo de Notas e Processamento de Matrioscas (ZIP in ZIP)
 """
 
 import zipfile
@@ -82,6 +82,23 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     except: pass
     return regs
 
+def processar_recursivo(arquivo_bytes, chaves_vistas, cnpj_cli):
+    """Lógica Matriosca: Abre ZIPs dentro de ZIPs e extrai XMLs"""
+    registros = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(arquivo_bytes)) as z:
+            for nome in z.namelist():
+                if nome.lower().endswith('.xml'):
+                    with z.open(nome) as f:
+                        registros.extend(extrair_dados_xml(f.read(), chaves_vistas, cnpj_cli))
+                elif nome.lower().endswith('.zip'):
+                    with z.open(nome) as f:
+                        registros.extend(processar_recursivo(f.read(), chaves_vistas, cnpj_cli))
+    except zipfile.BadZipFile:
+        # Se não for ZIP, tenta ler como XML direto
+        registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, cnpj_cli))
+    return registros
+
 # ─── INTERFACE E MOTOR DE CÁLCULO ────────────────────────────────────────────
 
 def main():
@@ -114,7 +131,7 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    # MOTOR DE ALÍQUOTA
+    # MOTOR DE ALÍQUOTA (13 CASAS)
     aliq_nom, deducao, p_icms = Decimal("0.04"), Decimal("0"), Decimal("0.335")
     for num, ini, fim, nom, ded, perc_icms in TABELAS_SIMPLES:
         if rbt12 <= fim:
@@ -131,7 +148,7 @@ def main():
     aliq_ef_view = aliq_efetiva.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
     aliq_st_view = aliq_st.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
 
-    files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"], key=f"files_{st.session_state.reset_key}")
+    files = st.file_uploader("Upload XMLs ou ZIPs (Matrioscas)", accept_multiple_files=True, type=["xml", "zip"], key=f"files_{st.session_state.reset_key}")
 
     if st.button("🚀 Gerar Memorial Automático") and files:
         if not cnpj_cli:
@@ -140,7 +157,8 @@ def main():
 
         chaves_vistas, registros = set(), []
         for f in files:
-            registros.extend(extrair_dados_xml(f.read(), chaves_vistas, cnpj_cli))
+            # Chama a função recursiva para tratar ZIPs ou XMLs isolados
+            registros.extend(processar_recursivo(f.read(), chaves_vistas, cnpj_cli))
         
         if registros:
             df = pd.DataFrame(registros)
@@ -170,7 +188,6 @@ def main():
             c1.metric("Faturamento Total", f"R$ {resumo['Faturamento'].sum():,.2f}")
             c2.metric("DAS Total", f"R$ {resumo['DAS'].sum():,.2f}")
             c3.metric("Alíquota Efetiva", f"{aliq_ef_view*100:.4f}%")
-            # Exibição do intervalo detectado
             c4.metric("Intervalo de Notas", f"{primeira_nota} a {ultima_nota}")
 
             st.markdown("### 📑 Resumo Analítico por CFOP")
@@ -179,7 +196,7 @@ def main():
             st.markdown("### 📋 Rastreabilidade")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.error("Nenhuma nota encontrada para o CNPJ informado.")
+            st.error("Nenhuma nota encontrada no pacote para o CNPJ informado.")
 
 if __name__ == "__main__":
     main()
