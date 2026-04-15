@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Separação Rigorosa (Própria vs Terceiros)
+Foco: PGDAS Anexos I e II, Redução de ST (CFOP 5401), Matrioscas e Separação Própria/Terceiros
 """
 
 import zipfile
@@ -31,9 +31,10 @@ TABELA_ANEXO_II = [
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
+# Incluindo 5401 rigorosamente na lista de ST para gatilho de redução de ICMS
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
-# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
+# ─── ESTILIZAÇÃO ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
 st.markdown("""
     <style>
@@ -75,11 +76,8 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         dest_node = inf.find(f"{ns_nfe}dest/{ns_nfe}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
-        # Rigor de Origem: Identifica se a emissão é Própria ou de Terceiros
         emissao_propria = (emit_cnpj == cnpj_cliente)
-        pertence_ao_cliente = (emit_cnpj == cnpj_cliente or dest_cnpj == cnpj_cliente)
-        
-        if cnpj_cliente and not pertence_ao_cliente:
+        if cnpj_cliente and not (emit_cnpj == cnpj_cliente or dest_cnpj == cnpj_cliente):
             return []
             
         ide = inf.find(f"{ns_nfe}ide")
@@ -89,16 +87,15 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         for det in inf.findall(f"{ns_nfe}det"):
             prod = det.find(f"{ns_nfe}prod")
             v_p = Decimal(prod.find(f"{ns_nfe}vProd").text)
+            cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
             v_desc = Decimal(prod.find(f"{ns_nfe}vDesc").text) if prod.find(f"{ns_nfe}vDesc") is not None else Decimal("0")
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
+            # Base Tributável do Item (Líquida de descontos + acessórios)
             base_item = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
-            # Só é faturamento (Receita Bruta) se for emissão PRÓPRIA e Tipo Saída (1)
-            # Ou se for entrada de devolução tributável
             categoria = "OUTROS"
             if emissao_propria and tp_nf == "1":
                 categoria = "RECEITA BRUTA"
@@ -132,7 +129,7 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cl
     return registros
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Multi-Anexo")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -150,7 +147,7 @@ def main():
 
     if st.button("🚀 Iniciar Auditoria") and files:
         if not cnpj_cli:
-            st.error("Por favor, informe o CNPJ do cliente para separar emissão própria de terceiros.")
+            st.error("Informe o CNPJ.")
             return
 
         chaves_vistas, chaves_canceladas, regs = set(), set(), []
@@ -161,19 +158,19 @@ def main():
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
             
-            # Regra de Ouro: Se for cancelada ou se for de terceiros (não faturamento), zera para o fiscal
+            # Zera faturamento de canceladas e emissão de terceiros
             df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
             df.loc[df['Origem'] == "TERCEIROS", ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
 
             # Resumo de Continuidade
-            st.subheader("📊 Resumo de Continuidade (Notas Auditadas)")
-            resumo_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(
-                Nota_Inicial=('Nota', 'min'), Nota_Final=('Nota', 'max'), Qtd_Notas=('Nota', 'nunique')
+            st.subheader("📊 Continuidade de Notas")
+            res_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(
+                Ini=('Nota', 'min'), Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')
             ).reset_index()
-            st.table(resumo_series)
+            st.table(res_series)
 
             # Motor de Cálculo Fiscal
-            df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
+            df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def obter_aliquota(row, rbt12_val):
                 tabela = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
@@ -181,35 +178,35 @@ def main():
                 for _, ini, fim, nom, ded, p_ic in tabela:
                     if rbt12_val <= fim: aliq_nom, deducao, p_icms = nom, ded, p_ic; break
                 aliq_ef = ((rbt12_val * aliq_nom) - deducao) / rbt12_val if rbt12_val > 0 else aliq_nom
+                # Redução da parcela de ICMS para CFOPs de ST (incluindo 5401)
                 return aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
 
-            resumo_cfop = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
+            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
                 'Valor_Produto_XML': 'sum', 'Base_Tributavel_Item': 'sum'
             }).reset_index()
 
-            resumo_cfop['Base_PGDAS_Líquida'] = resumo_cfop.apply(
+            resumo['Base_PGDAS'] = resumo.apply(
                 lambda x: (x['Base_Tributavel_Item'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Base_Tributavel_Item']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
             )
 
-            resumo_cfop['Aliq_Final'] = resumo_cfop.apply(lambda x: obter_aliquota(x, rbt12), axis=1)
-            resumo_cfop['DAS'] = resumo_cfop.apply(
-                lambda row: (row['Base_PGDAS_Líquida'] * row['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
+            resumo['Aliq_Final'] = resumo.apply(lambda x: obter_aliquota(x, rbt12), axis=1)
+            resumo['DAS'] = resumo.apply(
+                lambda r: (r['Base_PGDAS'] * r['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
             )
             
-            resumo_cfop['Alíquota (%)'] = resumo_cfop['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
+            resumo['Aliq_Perc'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Resumo Analítico por CFOP (Apenas Emissão Própria)")
-            st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Valor_Produto_XML', 'Base_PGDAS_Líquida', 'DAS']])
+            st.subheader("📑 Resumo Analítico PGDAS")
+            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Produto_XML', 'Base_PGDAS', 'DAS']])
 
             st.markdown("---")
             c1, c2 = st.columns(2)
-            c1.metric("Faturamento Líquido Auditado", f"R$ {resumo_cfop['Base_PGDAS_Líquida'].sum():,.2f}")
-            c2.metric("Total DAS", f"R$ {resumo_cfop['DAS'].sum():,.2f}")
-
-            st.subheader("📋 Rastreabilidade Geral (Própria vs Terceiros)")
-            st.dataframe(df[['Nota', 'Origem', 'Série', 'Modelo', 'CFOP', 'Base_Tributavel_Item', 'Cancelada', 'Chave']], use_container_width=True)
+            c1.metric("Faturamento Líquido Auditado", f"R$ {resumo['Base_PGDAS'].sum():,.2f}")
+            c2.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
+            
+            st.dataframe(df[['Nota', 'Origem', 'CFOP', 'Base_Tributavel_Item', 'Cancelada', 'Chave']], use_container_width=True)
         else:
-            st.error("Nenhuma nota processada. Verifique o CNPJ.")
+            st.error("Sem dados.")
 
 if __name__ == "__main__":
     main()
