@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - COM NOTA INICIAL/FINAL)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Continuidade de Numeração e Rigor de Devolução
+Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - ALTA PRECISÃO)
+Foco: PGDAS Anexos I e II, Faixas 1-6, Continuidade e Precisão Decimal Máxima
 """
 
 import zipfile
@@ -115,7 +115,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
-            # CATEGORIZAÇÃO BLINDADA
             categoria = "OUTROS"
             if is_o_emissor_alvo and tp_nf == "1":
                 if cfop not in CFOPS_EXCLUSAO_DAS and cfop not in CFOPS_DEVOLUCAO_VENDA:
@@ -198,10 +197,8 @@ def main():
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
             
-            # Zera faturamento inválido
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'V_IPI', 'Base_DAS']] = Decimal("0")
 
-            # ─── RESUMO DE CONTINUIDADE (RESTAURADO) ───
             st.subheader("📊 Resumo de Numeração e Continuidade")
             res_series = df.groupby(['Unidade_CNPJ', 'Tipo', 'Modelo', 'Série']).agg(
                 Nota_Inicial=('Nota', 'min'),
@@ -210,7 +207,6 @@ def main():
             ).reset_index()
             st.table(res_series)
 
-            # Motor Fiscal Faixas 1-6
             def calcular_aliq_efetiva(row, rb_total):
                 tab = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
                 faixa = tab[0]
@@ -229,11 +225,14 @@ def main():
                 res_fisc = df_f.apply(lambda r: calcular_aliq_efetiva(r, rbt12), axis=1, result_type='expand')
                 df_f['Base_F'], df_f['Aliq_F'], df_f['DAS'] = res_fisc[0], res_fisc[1], res_fisc[2]
 
-                st.subheader("📑 Memorial Analítico")
+                st.subheader("📑 Memorial Analítico (Alta Precisão Decimal)")
                 resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'V_Contabil': 'sum', 'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
                 resumo['Aliq_Ef (%)'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
-                resumo['Aliq_Ef (%)'] = resumo['Aliq_Ef (%)'].apply(lambda x: f"{(x*100):.10f}%")
-                st.table(resumo)
+                
+                # AUMENTO DE CASAS DECIMAIS PARA 15 CASAS NA EXIBIÇÃO
+                resumo['Aliq_Ef (%)'] = resumo['Aliq_Ef (%)'].apply(lambda x: f"{(x*100):.15f}%")
+                
+                st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Ef (%)', 'V_Contabil', 'Base_F', 'DAS']])
 
                 st.markdown("---")
                 m1, m2, m3 = st.columns(3)
