@@ -33,7 +33,7 @@ CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
-# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
+# ─── ESTILIZAÇÃO ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
 st.markdown("""
     <style>
@@ -55,12 +55,12 @@ def extrair_chaves_cancelamento(conteudo):
     try:
         root = ET.fromstring(conteudo.lstrip())
         ns_nfe = "{http://www.portalfiscal.inf.br/nfe}"
-        # Busca chave em procEvento ou na própria tag NFe se for o caso
+        # Busca em Eventos de Cancelamento
         for inf_evento in root.findall(f".//{ns_nfe}infEvento"):
-            tp_evento = inf_evento.find(f"{ns_nfe}tpEvento").text
-            if tp_evento == "110111": # Cancelamento
+            tp_ev = inf_evento.find(f"{ns_nfe}tpEvento").text
+            if tp_ev == "110111":
                 chaves.add(inf_evento.find(f"{ns_nfe}chNFe").text)
-        # Fallback para caso subam a nota normal mas queiram cancelar (ID da NFe)
+        # Busca em Notas Fiscais (se subirem o XML da nota como cancelada)
         inf_nfe = root.find(f".//{ns_nfe}infNFe")
         if inf_nfe is not None:
             chaves.add(inf_nfe.attrib.get('Id', '')[3:])
@@ -100,14 +100,14 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            v_st_destacado = Decimal("0")
+            # Captura ICMS ST para abatimento da Base Contábil
+            v_st = Decimal("0")
             icms_node = imposto.find(f".//{ns_nfe}ICMS")
             if icms_node is not None:
                 st_node = icms_node.find(f".//{ns_nfe}vICMSST")
-                if st_node is not None:
-                    v_st_destacado = Decimal(st_node.text)
+                if st_node is not None: v_st = Decimal(st_node.text)
             
-            base_tributavel = (v_p - v_desc + v_outro + v_frete - v_st_destacado).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            base_item = (v_p - v_desc + v_outro + v_frete - v_st).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
             regs.append({
@@ -115,8 +115,8 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if emissao_propria else "TERCEIROS",
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
                 "Valor_Contabil": v_p + v_outro + v_frete,
-                "Valor_ST": v_st_destacado,
-                "Base_DAS_Item": base_tributavel,
+                "Valor_ST": v_st,
+                "Base_DAS_Item": base_item,
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": "RECEITA BRUTA" if emissao_propria and tp_nf == "1" else ("DEVOLUÇÃO VENDA" if not emissao_propria and cfop in CFOPS_DEVOLUCAO_VENDA else "OUTROS"),
                 "Chave": chave
@@ -125,25 +125,29 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     except: pass
     return regs
 
-def processar_recursivo(arquivo_bytes, chaves_vistas, cnpj_cli, func_extrair):
+def processar_recursivo_cancelamento(arquivo_bytes):
+    chaves = set()
+    try:
+        with zipfile.ZipFile(io.BytesIO(arquivo_bytes)) as z:
+            for nome in z.namelist():
+                content = z.read(nome)
+                if nome.lower().endswith('.xml'): chaves.update(extrair_chaves_cancelamento(content))
+                elif nome.lower().endswith('.zip'): chaves.update(processar_recursivo_cancelamento(content))
+    except: chaves.update(extrair_chaves_cancelamento(arquivo_bytes))
+    return chaves
+
+def processar_recursivo_notas(arquivo_bytes, chaves_vistas, cnpj_cli):
     registros = []
     try:
         with zipfile.ZipFile(io.BytesIO(arquivo_bytes)) as z:
             for nome in z.namelist():
                 content = z.read(nome)
-                if nome.lower().endswith('.xml'):
-                    res = func_extrair(content)
-                    if isinstance(res, list): registros.extend(res)
-                    else: registros.add(res)
-                elif nome.lower().endswith('.zip'):
-                    registros.extend(processar_recursivo(content, chaves_vistas, cnpj_cli, func_extrair))
-    except:
-        res = func_extrair(arquivo_bytes)
-        if isinstance(res, list): registros.extend(res)
-        else: registros.add(res)
+                if nome.lower().endswith('.xml'): registros.extend(extrair_dados_xml(content, chaves_vistas, cnpj_cli))
+                elif nome.lower().endswith('.zip'): registros.extend(processar_recursivo_notas(content, chaves_vistas, cnpj_cli))
+    except: registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, cnpj_cli))
     return registros
 
-# ─── INTERFACE ───────────────────────────────────────────────────────────────
+# ─── INTERFACE E MOTOR PRINCIPAL ─────────────────────────────────────────────
 
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
@@ -160,54 +164,41 @@ def main():
             st.session_state.reset_key += 1
             st.rerun()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        files_normal = st.file_uploader("Upload XMLs de Movimentação", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
-    with col2:
-        files_cancel = st.file_uploader("Upload XMLs de CANCELAMENTO", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
+    c_up1, c_up2 = st.columns(2)
+    with c_up1:
+        f_norm = st.file_uploader("Upload XMLs Vendas/Entradas", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
+    with c_up2:
+        f_canc = st.file_uploader("Upload XMLs Canceladas", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
 
-    if st.button("🚀 Iniciar Auditoria") and files_normal:
+    if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not cnpj_cli:
             st.error("Informe o CNPJ.")
             return
 
-        # 1. Processar Cancelamentos Primeiro
+        # 1. Mapear chaves canceladas
         ch_canceladas = set()
-        for f in files_cancel:
-            # Reutiliza a lógica recursiva mas passa a função de extrair chaves
-            def extrair_ch(c):
-                ch = set()
-                try:
-                    root = ET.fromstring(c.lstrip())
-                    ns = "{http://www.portalfiscal.inf.br/nfe}"
-                    for ev in root.findall(f".//{ns}infEvento"):
-                        if ev.find(f"{ns}tpEvento").text == "110111": ch.add(ev.find(f"{ns}chNFe").text)
-                    inf = root.find(f".//{ns}infNFe")
-                    if inf is not None: ch.add(inf.attrib.get('Id', '')[3:])
-                except: pass
-                return ch
-            
-            try:
-                with zipfile.ZipFile(f) as z:
-                    for n in z.namelist():
-                        if n.lower().endswith('.xml'): ch_canceladas.update(extrair_ch(z.read(n)))
-            except:
-                ch_canceladas.update(extrair_ch(f.read()))
+        for f in f_canc: ch_canceladas.update(processar_recursivo_cancelamento(f.read()))
 
-        # 2. Processar Notas Normais
+        # 2. Processar notas
         ch_vistas, regs = set(), []
-        for f in files_normal:
-            regs.extend(processar_recursivo(f.read(), ch_vistas, cnpj_cli, lambda c: extrair_dados_xml(c, ch_vistas, cnpj_cli)))
+        for f in f_norm: regs.extend(processar_recursivo_notas(f.read(), ch_vistas, cnpj_cli))
         
         if regs:
             df = pd.DataFrame(regs)
-            
-            # FILTRO DE CANCELAMENTO
             df['Cancelada'] = df['Chave'].isin(ch_canceladas)
+            
+            # Zera faturamento de canceladas e terceiros (exceto devolução tributável)
             df.loc[df['Cancelada'], ['Valor_Contabil', 'Valor_ST', 'Base_DAS_Item']] = Decimal("0")
             df.loc[df['Origem'] == "TERCEIROS", ['Valor_Contabil', 'Valor_ST', 'Base_DAS_Item']] = Decimal("0")
 
-            # Resumo e Cálculo
+            # ─── RESUMO DE CONTINUIDADE (TIPO E SÉRIE) ───
+            st.subheader("📊 Resumo de Continuidade por Tipo e Série")
+            res_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(
+                Nota_Inicial=('Nota', 'min'), Nota_Final=('Nota', 'max'), Qtd_Notas=('Nota', 'nunique')
+            ).reset_index()
+            st.table(res_series)
+
+            # ─── MEMORIAL FISCAL ───
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def obter_aliq(row, rb):
@@ -219,22 +210,24 @@ def main():
                 return ae * (Decimal("1.0") - pi) if row['ST'] else ae
 
             resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil': 'sum', 'Valor_ST': 'sum', 'Base_DAS_Item': 'sum'}).reset_index()
-            resumo['Base_DAS'] = resumo.apply(lambda x: (x['Base_DAS_Item'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Base_DAS_Item']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
-            resumo['Aliq'] = resumo.apply(lambda x: obter_aliq(x, rbt12), axis=1)
-            resumo['DAS'] = resumo.apply(lambda x: (x['Base_DAS'] * x['Aliq']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
+            resumo['Base_Líquida'] = resumo.apply(lambda x: (x['Base_DAS_Item'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Base_DAS_Item']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
+            resumo['Aliq_Final'] = resumo.apply(lambda x: obter_aliq(x, rbt12), axis=1)
+            resumo['DAS'] = resumo.apply(lambda row: (row['Base_Líquida'] * row['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
+            resumo['Aliq_Perc'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Memorial de Cálculo (Excluindo Cancelamentos)")
-            st.table(resumo[['Anexo', 'CFOP', 'Categoria', 'Base_DAS', 'DAS']])
+            st.subheader("📑 Resumo Analítico por CFOP (Base = Contábil - ST)")
+            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil', 'Valor_ST', 'Base_Líquida', 'DAS']])
 
             st.markdown("---")
-            c1, c2 = st.columns(2)
-            c1.metric("Base Líquida PGDAS", f"R$ {resumo['Base_DAS'].sum():,.2f}")
-            c2.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Faturamento Contábil", f"R$ {resumo['Valor_Contabil'].sum():,.2f}")
+            m2.metric("ST Abatido da Base", f"R$ {resumo['Valor_ST'].sum():,.2f}")
+            m3.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
             
-            st.subheader("📋 Auditoria de Cancelamentos")
-            st.dataframe(df[df['Cancelada']][['Nota', 'Série', 'CFOP', 'Chave']], use_container_width=True)
+            st.subheader("📋 Auditoria de Cancelamentos e Rastreabilidade")
+            st.dataframe(df[['Nota', 'Origem', 'CFOP', 'Base_DAS_Item', 'Cancelada', 'Chave']], use_container_width=True)
         else:
-            st.error("Nenhuma nota encontrada.")
+            st.error("Nenhuma nota processada.")
 
 if __name__ == "__main__":
     main()
