@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - BLINDAGEM DE SENTIDO)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Rigor de Devolução de Venda vs Entrada de Terceiro
+Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - COM NOTA INICIAL/FINAL)
+Foco: PGDAS Anexos I e II, Faixas 1-6, Continuidade de Numeração e Rigor de Devolução
 """
 
 import zipfile
@@ -35,7 +35,7 @@ TABELA_ANEXO_II = [
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411", "5201", "5202", "5411", "6201", "6202", "6411"}
-CFOPS_EXCLUSAO_DAS = {"5949", "6905", "6209", "6152", "5151", "5152", "6151"}
+CFOPS_EXCLUSAO_DAS = {"5949", "6905", "6209", "6152", "5151", "5152", "6151", "6202", "6411", "5202", "5411"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
@@ -115,22 +115,18 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
-            # ─── HIERARQUIA FISCAL COM TRAVA DE SENTIDO DE OPERAÇÃO ───
+            # CATEGORIZAÇÃO BLINDADA
             categoria = "OUTROS"
-            
-            # RECEITA BRUTA: Você emite (Própria) e a mercadoria SAI (Tipo 1)
             if is_o_emissor_alvo and tp_nf == "1":
                 if cfop not in CFOPS_EXCLUSAO_DAS and cfop not in CFOPS_DEVOLUCAO_VENDA:
                     categoria = "RECEITA BRUTA"
             
-            # DEVOLUÇÃO DE VENDA (DEDUZ O SEU DAS): 
-            # Caso 1: Você emite uma ENTRADA (Tipo 0) para anular sua venda.
-            # Caso 2: O Terceiro emite uma SAÍDA (Tipo 1) devolvendo para você (Destinatário).
             if cfop in CFOPS_DEVOLUCAO_VENDA:
                 if (is_o_emissor_alvo and tp_nf == "0") or (is_o_destinatario_alvo and tp_nf == "1"):
                     categoria = "DEVOLUÇÃO VENDA"
 
             regs.append({
+                "Unidade_CNPJ": emit_cnpj if is_o_emissor_alvo else dest_cnpj,
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, 
                 "Emitente": emit_cnpj, "Destinatario": dest_cnpj,
@@ -164,7 +160,7 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Rihanna Mode")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Integral")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -190,12 +186,10 @@ def main():
         if not cnpj_cli:
             st.error("Informe o CNPJ."); return
 
-        # 1. Cancelamentos
         ch_canc = set()
         for f in f_canc:
             ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
 
-        # 2. Notas
         ch_vistas, regs = set(), []
         for f in f_norm:
             regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, cnpj_cliente=cnpj_cli))
@@ -204,8 +198,17 @@ def main():
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
             
-            # Zera faturamento inválido (Canceladas ou Categoria OUTROS)
+            # Zera faturamento inválido
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'V_IPI', 'Base_DAS']] = Decimal("0")
+
+            # ─── RESUMO DE CONTINUIDADE (RESTAURADO) ───
+            st.subheader("📊 Resumo de Numeração e Continuidade")
+            res_series = df.groupby(['Unidade_CNPJ', 'Tipo', 'Modelo', 'Série']).agg(
+                Nota_Inicial=('Nota', 'min'),
+                Nota_Final=('Nota', 'max'),
+                Qtd_Processada=('Nota', 'nunique')
+            ).reset_index()
+            st.table(res_series)
 
             # Motor Fiscal Faixas 1-6
             def calcular_aliq_efetiva(row, rb_total):
@@ -238,7 +241,7 @@ def main():
                 m2.metric("(-) Devoluções Válidas", f"R$ {abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()):,.2f}")
                 m3.metric("DAS Final", f"R$ {df_f['DAS'].sum():,.2f}")
             
-            st.subheader("📋 Auditoria Detalhada (Conferência de Sentido)")
+            st.subheader("📋 Auditoria Detalhada")
             st.dataframe(df[['Nota', 'CFOP', 'Emitente', 'Destinatario', 'Categoria', 'Tipo', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
         else: st.error("Nenhuma nota encontrada com o CNPJ informado.")
 
