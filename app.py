@@ -30,7 +30,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── REGRAS FISCAIS UNIVERSAIS (ANEXO I - COMÉRCIO) ──────────────────────────
-# Tabelas conforme Lei Complementar 123/2006
 TABELAS_SIMPLES = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3400")),
@@ -87,16 +86,37 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 def main():
     st.title("🛡️ Sentinela - Automação PGDAS (Anexo I)")
     
+    # Gerenciamento de Estado para Reset
+    if 'reset_key' not in st.session_state:
+        st.session_state.reset_key = 0
+
     with st.sidebar:
         st.header("👤 Cliente")
-        cnpj_cli = limpar_cnpj(st.text_input("CNPJ", value="52.980.554/0001-04"))
+        # O uso da key dinâmica permite forçar o reset do componente
+        cnpj_input = st.text_input("CNPJ", value="", placeholder="00.000.000/0000-00", key=f"cnpj_{st.session_state.reset_key}")
+        cnpj_cli = limpar_cnpj(cnpj_input)
         
         st.header("⚙️ Receita Bruta")
-        rbt12_raw = st.text_input("Faturamento RBT12 (12 meses)", value="504.403,47")
-        rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
+        rbt12_raw = st.text_input("Faturamento RBT12 (12 meses)", value="", placeholder="0,00", key=f"rbt12_{st.session_state.reset_key}")
+        
+        if rbt12_raw:
+            try:
+                # Trata formatos como 1.234,56 ou 1234.56
+                clean_rbt12 = rbt12_raw.replace(".", "").replace(",", ".")
+                rbt12 = Decimal(clean_rbt12)
+            except:
+                st.error("Formato de RBT12 inválido.")
+                rbt12 = Decimal("0")
+        else:
+            rbt12 = Decimal("0")
+
+        st.markdown("---")
+        if st.button("🗑️ Limpar Dados e Resetar"):
+            st.session_state.reset_key += 1
+            st.cache_data.clear()
+            st.rerun()
 
     # ─── MOTOR DE ALÍQUOTA AUTOMÁTICA (13 CASAS) ─────────────────────────────
-    # Busca a faixa correta na tabela do Simples
     aliq_nom, deducao, p_icms = Decimal("0.04"), Decimal("0"), Decimal("0.335")
     for num, ini, fim, nom, ded, perc_icms in TABELAS_SIMPLES:
         if rbt12 <= fim:
@@ -110,13 +130,16 @@ def main():
         aliq_efetiva = Decimal("0.04")
         aliq_st = aliq_efetiva
 
-    # Views para Dashboard
     aliq_ef_view = aliq_efetiva.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
     aliq_st_view = aliq_st.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
 
-    files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"])
+    files = st.file_uploader("Upload XMLs", accept_multiple_files=True, type=["xml"], key=f"files_{st.session_state.reset_key}")
 
     if st.button("🚀 Gerar Memorial Automático") and files:
+        if not cnpj_cli:
+            st.warning("Por favor, informe o CNPJ para filtrar as notas.")
+            return
+
         chaves_vistas, registros = set(), []
         for f in files:
             registros.extend(extrair_dados_xml(f.read(), chaves_vistas, cnpj_cli))
@@ -125,11 +148,14 @@ def main():
             df = pd.DataFrame(registros)
             df_saida = df[df["Tipo"] == "SAÍDA"].copy()
             
+            if df_saida.empty:
+                st.warning("Nenhuma nota de SAÍDA encontrada para este CNPJ.")
+                return
+
             # Agrupamento para consolidar faturamento por CFOP
             resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor Cru': 'sum'}).reset_index()
             
             def aplicar_imposto(row):
-                # Arredonda a base para 2 casas antes da conta final conforme regra fiscal
                 base = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 aliq = aliq_st if row['ST'] else aliq_efetiva
                 return (base * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
@@ -150,7 +176,7 @@ def main():
             st.markdown("### 📋 Rastreabilidade")
             st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
         else:
-            st.error("Nenhuma nota encontrada.")
+            st.error("Nenhuma nota encontrada para o CNPJ informado.")
 
 if __name__ == "__main__":
     main()
