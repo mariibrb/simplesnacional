@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Gestão de Cancelamentos e Filtro de Remessas/Transferências
+Foco: PGDAS Anexos I e II, Gestão de Cancelamentos e Abatimento de Devoluções (1202/2202)
 """
 
 import zipfile
@@ -35,7 +35,6 @@ TABELA_ANEXO_II = [
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
-# CFOPS que não geram receita tributável (Remessas, Transferências, Devoluções de Compra)
 CFOPS_EXCLUSAO_DAS = {
     "5949", "6905", "6209", "6152", "6202", "6411", "5202", "5411", 
     "1203", "1204", "2203", "2204", "5151", "5152", "6151"
@@ -108,16 +107,12 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             if icms_node is not None:
                 st_node = icms_node.find(f".//{ns_nfe}vICMSST")
                 if st_node is not None: v_st = Decimal(st_node.text)
-            ipi_node = imposto.find(f".//{ns_nfe}IPI")
-            if ipi_node is not None:
-                v_ipi_val = ipi_node.find(f".//{ns_nfe}vIPI")
-                if v_ipi_val is not None: v_ipi = Decimal(v_ipi_val.text)
-
-            valor_contabil_item = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            
+            valor_contabil_item = (v_p + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
-            # CATEGORIZAÇÃO COM FILTRO DE EXCLUSÃO
+            # CATEGORIZAÇÃO COM FOCO EM DEVOLUÇÕES DE ENTRADA (1202/2202)
             categoria = "OUTROS"
             if emissao_propria and tp_nf == "1" and cfop not in CFOPS_EXCLUSAO_DAS:
                 categoria = "RECEITA BRUTA"
@@ -187,13 +182,11 @@ def main():
         if not cnpj_cli:
             st.error("Informe o CNPJ."); return
 
-        # 1. Processar Cancelamentos
         ch_canc = set()
         for f in f_canc:
             ch_list = processar_recursivo_generic(f.read(), lambda c: extrair_chaves_cancelamento(c))
             ch_canc.update(ch_list)
 
-        # 2. Processar Notas Normais
         ch_vistas, regs = set(), []
         for f in f_norm:
             regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, cnpj_cliente=cnpj_cli))
@@ -201,15 +194,13 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
-            # Regra: Zera bases para canceladas, terceiros e categoria OUTROS (CFOPS excluídos)
-            df.loc[df['Cancelada'] | (df['Origem'] == "TERCEIROS") | (df['Categoria'] == "OUTROS"), 
-                   ['Valor_Contabil_Item', 'Valor_ST_Item', 'Base_DAS_Item']] = Decimal("0")
+            
+            # Zerar valores de notas canceladas ou terceiros que NÃO sejam devolução de venda
+            df.loc[df['Cancelada'], ['Valor_Contabil_Item', 'Valor_ST_Item', 'Base_DAS_Item']] = Decimal("0")
+            df.loc[(df['Origem'] == "TERCEIROS") & (df['Categoria'] != "DEVOLUÇÃO VENDA"), ['Valor_Contabil_Item', 'Valor_ST_Item', 'Base_DAS_Item']] = Decimal("0")
+            df.loc[df['Categoria'] == "OUTROS", ['Valor_Contabil_Item', 'Valor_ST_Item', 'Base_DAS_Item']] = Decimal("0")
 
-            # Resumo por Série
-            st.subheader("📊 Continuidade por Série")
-            st.table(df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(Ini=('Nota', 'min'), Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index())
-
-            # Motor Fiscal de Alíquota Efetiva Progressiva
+            # Motor Fiscal com Abatimento de Devolução
             def calcular_aliq_efetiva(row, rb_total):
                 tab = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
                 faixa = tab[0]
@@ -220,6 +211,8 @@ def main():
                 _, _, _, a_nom, ded, p_ic = faixa
                 ae = ((rb_total * a_nom) - ded) / rb_total if rb_total > 0 else a_nom
                 a_final = ae * (Decimal("1.0") - p_ic) if row['ST'] else ae
+                
+                # APLICAÇÃO DO SINAL NEGATIVO PARA DEVOLUÇÕES (Abatimento de Base)
                 mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
                 base_calc = (row['Base_DAS_Item'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
@@ -229,21 +222,19 @@ def main():
             res_fiscal = df_f.apply(lambda r: calcular_aliq_efetiva(r, rbt12), axis=1, result_type='expand')
             df_f['Base_Final'], df_f['Aliq_F'], df_f['DAS'] = res_fiscal[0], res_fiscal[1], res_fiscal[2]
 
-            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil_Item': 'sum', 'Valor_ST_Item': 'sum', 'Base_Final': 'sum', 'DAS': 'sum'}).reset_index()
-            resumo['Aliq_Perc'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
-            resumo['Aliq_Perc'] = resumo['Aliq_Perc'].apply(lambda x: f"{(x*100):.10f}%")
+            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil_Item': 'sum', 'Base_Final': 'sum', 'DAS': 'sum'}).reset_index()
             
-            st.subheader("📑 Memorial Analítico por CFOP (Excluindo Remessas/Transferências)")
-            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil_Item', 'Valor_ST_Item', 'Base_Final', 'DAS']])
+            st.subheader("📑 Memorial Analítico (CFOPS 1202/2202 Abatendo Base)")
+            st.table(resumo)
 
             st.markdown("---")
             m1, m2, m3 = st.columns(3)
-            m1.metric("Contábil Tributável", f"R$ {resumo['Valor_Contabil_Item'].sum():,.2f}")
-            m2.metric("Base PGDAS Líquida", f"R$ {resumo['Base_Final'].sum():,.2f}")
-            m3.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
+            m1.metric("Faturamento Bruto", f"R$ {df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_Final'].sum():,.2f}")
+            m2.metric("(-) Devoluções de Venda", f"R$ {abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_Final'].sum()):,.2f}")
+            m3.metric("Base DAS Líquida", f"R$ {df_f['Base_Final'].sum():,.2f}")
             
             st.subheader("📋 Auditoria Detalhada")
-            st.dataframe(df[['Nota', 'Série', 'CFOP', 'Valor_Contabil_Item', 'Base_DAS_Item', 'Cancelada', 'Categoria']], use_container_width=True)
+            st.dataframe(df[['Nota', 'Série', 'CFOP', 'Valor_Contabil_Item', 'Base_DAS_Item', 'Categoria', 'Tipo']], use_container_width=True)
         else:
             st.error("Nenhuma nota encontrada.")
 
