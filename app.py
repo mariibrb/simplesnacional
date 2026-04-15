@@ -1,7 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Versão: 3.0 - Rigor Total em Segregação de ST e Redução de Base
-Foco: Anexo I e II, Redução de ICMS/ST, Matrioscas e Devoluções
+Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
+Foco: PGDAS Anexos I e II, Redução de ICMS/ST, Matrioscas e Auditoria de Base
 """
 
 import zipfile
@@ -12,7 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão de 60 casas decimais para bater com os centavos do PGDAS
+# Precisão de 60 casas para cálculos fiscais de alta fidelidade
 getcontext().prec = 60 
 
 # ─── REGRAS FISCAIS UNIVERSAIS ──────────────────────────────────────────────
@@ -74,6 +73,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
         dest_cnpj = re.sub(r'\D', '', dest_node.text) if dest_node is not None else ""
         
+        # Filtro Rigoroso de Identidade
         if cnpj_cliente and (emit_cnpj != cnpj_cliente and dest_cnpj != cnpj_cliente):
             return []
             
@@ -87,11 +87,14 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         for det in dets:
             v_p = Decimal(det.find(f"{ns}prod/{ns}vProd").text)
             cfop = det.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
+            
+            # Cálculo de Proporcionalidade Fiscal (vNF distribuído por item)
             prop = v_p / v_prod_total if v_prod_total > 0 else Decimal("0")
-            
+            valor_base_item = (v_nf * prop)
+
             anexo = "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I"
-            is_st = cfop in CFOPS_ST
             
+            # Classificação por Categoria
             categoria = "OUTROS"
             if tp_nf == "1":
                 categoria = "RECEITA BRUTA"
@@ -100,8 +103,10 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             
             regs.append({
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
-                "CFOP": cfop, "ST": is_st, "Anexo": anexo,
-                "Valor Cru": v_nf * prop, "Categoria": categoria, "Chave": chave
+                "CFOP": cfop, "ST": cfop in CFOPS_ST, "Anexo": anexo,
+                "Valor_Produto_XML": v_p,
+                "Valor_Proporcional_NF": valor_base_item,
+                "Categoria": categoria, "Chave": chave
             })
         chaves_vistas.add(chave)
     except: pass
@@ -119,24 +124,24 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, cnpj_cli):
     except: registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, cnpj_cli))
     return registros
 
-# ─── INTERFACE ───────────────────────────────────────────────────────────────
+# ─── INTERFACE E MOTOR DE CÁLCULO ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria PGDAS (Full)")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria de Faturamento Integral")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
-        st.header("👤 Cliente")
+        st.header("👤 Cliente Auditado")
         cnpj_cli = re.sub(r'\D', '', st.text_input("CNPJ Emitente", key=f"c_{st.session_state.reset_key}"))
-        st.header("⚙️ Parâmetros")
+        st.header("⚙️ Parâmetros PGDAS")
         rbt12_raw = st.text_input("RBT12 Acumulado", value="", key=f"r_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
-        if st.button("🗑️ Resetar Sistema"):
+        if st.button("🗑️ Resetar Tudo"):
             st.session_state.reset_key += 1
             st.rerun()
 
-    # Cálculo Antecipado das Alíquotas por Anexo (Com Redução ST Embutida na Lógica)
+    # Cálculo Antecipado de Alíquotas com Redução de ST
     aliq_ef1, p_icms1 = calcular_dados_pgdas(rbt12, TABELA_ANEXO_I)
     aliq_st1 = aliq_ef1 * (Decimal("1.0") - p_icms1)
     
@@ -145,7 +150,7 @@ def main():
 
     files = st.file_uploader("Upload XMLs/ZIPs", accept_multiple_files=True, type=["xml", "zip"], key=f"f_{st.session_state.reset_key}")
 
-    if st.button("🚀 Executar Auditoria") and files:
+    if st.button("🚀 Iniciar Auditoria") and files:
         chaves_vistas, regs = set(), []
         for f in files: regs.extend(processar_recursivo(f.read(), chaves_vistas, cnpj_cli))
         
@@ -153,12 +158,13 @@ def main():
             df = pd.DataFrame(regs)
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             
-            def processar_fiscal_linha(row):
-                base_bruta = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
+            def aplicar_logica_fiscal(row):
+                # Valor proporcional considerando frete/desconto/vNF
+                base_calculo = row['Valor_Proporcional_NF'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 multiplicador = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
-                base_final = base_bruta * multiplicador
+                base_final = base_calculo * multiplicador
                 
-                # Seleção Rigorosa da Alíquota (Com Redução se ST)
+                # Seleção de Alíquota Específica
                 if row['Anexo'] == "ANEXO I":
                     aliq = aliq_st1 if row['ST'] else aliq_ef1
                 else:
@@ -166,34 +172,41 @@ def main():
                 
                 return base_final, aliq, (base_final * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
-            calc_data = df_fiscal.apply(processar_fiscal_linha, axis=1, result_type='expand')
-            df_fiscal['Base_Calculo'], df_fiscal['Aliq_Final'], df_fiscal['DAS_Item'] = calc_data[0], calc_data[1], calc_data[2]
+            calc_data = df_fiscal.apply(aplicar_logica_fiscal, axis=1, result_type='expand')
+            df_fiscal['Base_Liquida'], df_fiscal['Aliq_Final'], df_fiscal['DAS'] = calc_data[0], calc_data[1], calc_data[2]
 
-            st.markdown("### 📑 Memorial Detalhado: Segregação e Redução de ST")
-            
-            # Tabela de Resumo por CFOP
+            # ─── APRESENTAÇÃO DOS DADOS ──────────────────────────────────────
+            st.subheader("📊 Resumo Analítico por CFOP e Categoria")
             resumo = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'Base_Calculo': 'sum', 
-                'DAS_Item': 'sum', 
+                'Valor_Produto_XML': 'sum',
+                'Base_Liquida': 'sum',
+                'DAS': 'sum',
                 'Aliq_Final': 'first'
             }).reset_index()
             
             resumo['Alíquota (%)'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
-            
-            # Exibição organizada
-            tab_show = resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Base_Calculo', 'DAS_Item']].copy()
-            tab_show['ST'] = tab_show['ST'].map({True: "SIM (ICMS Retido)", False: "NÃO (Integral)"})
-            st.table(tab_show)
+            res_show = resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Valor_Produto_XML', 'Base_Liquida', 'DAS']].copy()
+            res_show['ST'] = res_show['ST'].map({True: "SIM", False: "NÃO"})
+            st.table(res_show)
 
             st.markdown("---")
-            c1, c2 = st.columns(2)
-            c1.metric("Base de Cálculo Total (Líquida)", f"R$ {df_fiscal['Base_Calculo'].sum():,.2f}")
-            c2.metric("Total DAS Gerado", f"R$ {df_fiscal['DAS_Item'].sum():,.2f}")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Faturamento XML Bruto", f"R$ {df_fiscal['Valor_Produto_XML'].sum():,.2f}")
+            c2.metric("Base PGDAS (vNF Líquido)", f"R$ {df_fiscal['Base_Liquida'].sum():,.2f}")
+            c3.metric("Total DAS", f"R$ {df_fiscal['DAS'].sum():,.2f}")
             
-            st.markdown("### 📋 Rastreabilidade de Itens (Conferência Unitária)")
-            st.dataframe(df_fiscal.sort_values(["Anexo", "Nota"]), use_container_width=True)
+            st.subheader("📋 Rastreabilidade de Notas e Séries")
+            # Mostrar intervalos de notas por série para auditoria de pulos
+            df_saida = df[df["Categoria"] == "RECEITA BRUTA"]
+            if not df_saida.empty:
+                intervalos = df_saida.groupby(['Modelo', 'Série']).agg(
+                    Inicio=('Nota', 'min'), Fim=('Nota', 'max'), Notas=('Nota', 'nunique')
+                ).reset_index()
+                st.dataframe(intervalos, hide_index=True)
+
+            st.dataframe(df_fiscal.sort_values(["Nota"]), use_container_width=True)
         else:
-            st.error("Nenhum dado válido encontrado para o CNPJ e arquivos enviados.")
+            st.error("Nenhuma nota processada para o CNPJ informado.")
 
 if __name__ == "__main__":
     main()
