@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Gestão de Cancelamentos e Filtro de Devoluções de Compra
+Foco: PGDAS Anexos I e II, Faixas 1-6, Gestão de Cancelamentos e Filtro de Remessas/Transferências
 """
 
 import zipfile
@@ -35,7 +35,11 @@ TABELA_ANEXO_II = [
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
-CFOPS_DEVOLUCAO_COMPRA = {"1203", "1204", "2203", "2204", "5201", "5202", "6201", "6202", "5411", "6411"}
+# CFOPS que não geram receita tributável (Remessas, Transferências, Devoluções de Compra)
+CFOPS_EXCLUSAO_DAS = {
+    "5949", "6905", "6209", "6152", "6202", "6411", "5202", "5411", 
+    "1203", "1204", "2203", "2204", "5151", "5152", "6151"
+}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
@@ -113,9 +117,9 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
-            # CATEGORIZAÇÃO RIGOROSA
+            # CATEGORIZAÇÃO COM FILTRO DE EXCLUSÃO
             categoria = "OUTROS"
-            if emissao_propria and tp_nf == "1" and cfop not in CFOPS_DEVOLUCAO_COMPRA:
+            if emissao_propria and tp_nf == "1" and cfop not in CFOPS_EXCLUSAO_DAS:
                 categoria = "RECEITA BRUTA"
             elif not emissao_propria and cfop in CFOPS_DEVOLUCAO_VENDA:
                 categoria = "DEVOLUÇÃO VENDA"
@@ -126,7 +130,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
                 "Valor_Contabil_Item": valor_contabil_item,
                 "Valor_ST_Item": v_st,
-                "Valor_IPI_Item": v_ipi,
                 "Base_DAS_Item": base_das,
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": categoria,
@@ -198,8 +201,9 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
-            # Regra: Zera faturamento de canceladas, terceiros e devoluções de compra (categoria OUTROS)
-            df.loc[df['Cancelada'] | (df['Origem'] == "TERCEIROS") | (df['Categoria'] == "OUTROS"), ['Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_DAS_Item']] = Decimal("0")
+            # Regra: Zera bases para canceladas, terceiros e categoria OUTROS (CFOPS excluídos)
+            df.loc[df['Cancelada'] | (df['Origem'] == "TERCEIROS") | (df['Categoria'] == "OUTROS"), 
+                   ['Valor_Contabil_Item', 'Valor_ST_Item', 'Base_DAS_Item']] = Decimal("0")
 
             # Resumo por Série
             st.subheader("📊 Continuidade por Série")
@@ -225,16 +229,16 @@ def main():
             res_fiscal = df_f.apply(lambda r: calcular_aliq_efetiva(r, rbt12), axis=1, result_type='expand')
             df_f['Base_Final'], df_f['Aliq_F'], df_f['DAS'] = res_fiscal[0], res_fiscal[1], res_fiscal[2]
 
-            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil_Item': 'sum', 'Valor_ST_Item': 'sum', 'Valor_IPI_Item': 'sum', 'Base_Final': 'sum', 'DAS': 'sum'}).reset_index()
+            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil_Item': 'sum', 'Valor_ST_Item': 'sum', 'Base_Final': 'sum', 'DAS': 'sum'}).reset_index()
             resumo['Aliq_Perc'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
             resumo['Aliq_Perc'] = resumo['Aliq_Perc'].apply(lambda x: f"{(x*100):.10f}%")
             
-            st.subheader("📑 Memorial Analítico por CFOP")
+            st.subheader("📑 Memorial Analítico por CFOP (Excluindo Remessas/Transferências)")
             st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil_Item', 'Valor_ST_Item', 'Base_Final', 'DAS']])
 
             st.markdown("---")
             m1, m2, m3 = st.columns(3)
-            m1.metric("Contábil Auditado", f"R$ {resumo['Valor_Contabil_Item'].sum():,.2f}")
+            m1.metric("Contábil Tributável", f"R$ {resumo['Valor_Contabil_Item'].sum():,.2f}")
             m2.metric("Base PGDAS Líquida", f"R$ {resumo['Base_Final'].sum():,.2f}")
             m3.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
             
