@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Controle de Continuidade
+Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Separação Rigorosa (Própria vs Terceiros)
 """
 
 import zipfile
@@ -75,7 +75,11 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         dest_node = inf.find(f"{ns_nfe}dest/{ns_nfe}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
-        if cnpj_cliente and (emit_cnpj != cnpj_cliente and dest_cnpj != cnpj_cliente):
+        # Rigor de Origem: Identifica se a emissão é Própria ou de Terceiros
+        emissao_propria = (emit_cnpj == cnpj_cliente)
+        pertence_ao_cliente = (emit_cnpj == cnpj_cliente or dest_cnpj == cnpj_cliente)
+        
+        if cnpj_cliente and not pertence_ao_cliente:
             return []
             
         ide = inf.find(f"{ns_nfe}ide")
@@ -93,15 +97,21 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
             base_item = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
+            # Só é faturamento (Receita Bruta) se for emissão PRÓPRIA e Tipo Saída (1)
+            # Ou se for entrada de devolução tributável
+            categoria = "OUTROS"
+            if emissao_propria and tp_nf == "1":
+                categoria = "RECEITA BRUTA"
+            elif not emissao_propria and cfop in CFOPS_DEVOLUCAO_VENDA:
+                categoria = "DEVOLUÇÃO VENDA"
+
             regs.append({
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
-                "CFOP": cfop, "ST": cfop in CFOPS_ST, 
+                "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if emissao_propria else "TERCEIROS",
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "Valor_Produto_XML": v_p, 
-                "Base_Tributavel_Item": base_item,
+                "Valor_Produto_XML": v_p, "Base_Tributavel_Item": base_item,
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
-                "Categoria": "RECEITA BRUTA" if tp_nf == "1" else ("DEVOLUÇÃO VENDA" if cfop in CFOPS_DEVOLUCAO_VENDA else "OUTROS"),
-                "Chave": chave
+                "Categoria": categoria, "Chave": chave
             })
         chaves_vistas.add(chave)
     except: pass
@@ -121,8 +131,6 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cl
         registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cli))
     return registros
 
-# ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
-
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
     
@@ -141,6 +149,10 @@ def main():
     files = st.file_uploader("Upload XMLs/ZIPs", accept_multiple_files=True, type=["xml", "zip"], key=f"f_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and files:
+        if not cnpj_cli:
+            st.error("Por favor, informe o CNPJ do cliente para separar emissão própria de terceiros.")
+            return
+
         chaves_vistas, chaves_canceladas, regs = set(), set(), []
         for f in files:
             regs.extend(processar_recursivo(f.read(), chaves_vistas, chaves_canceladas, cnpj_cli))
@@ -148,33 +160,31 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
+            
+            # Regra de Ouro: Se for cancelada ou se for de terceiros (não faturamento), zera para o fiscal
             df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
+            df.loc[df['Origem'] == "TERCEIROS", ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
 
-            # ─── RESUMO DE CONTINUIDADE (RESTAURADO) ────────────────────────
-            st.subheader("📊 Resumo de Continuidade (Por Tipo e Série)")
-            resumo_series = df.groupby(['Tipo', 'Modelo', 'Série']).agg(
-                Nota_Inicial=('Nota', 'min'),
-                Nota_Final=('Nota', 'max'),
-                Qtd_Notas=('Nota', 'nunique')
+            # Resumo de Continuidade
+            st.subheader("📊 Resumo de Continuidade (Notas Auditadas)")
+            resumo_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(
+                Nota_Inicial=('Nota', 'min'), Nota_Final=('Nota', 'max'), Qtd_Notas=('Nota', 'nunique')
             ).reset_index()
             st.table(resumo_series)
 
-            # ─── MOTOR DE CÁLCULO FISCAL ────────────────────────────────────
+            # Motor de Cálculo Fiscal
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def obter_aliquota(row, rbt12_val):
                 tabela = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
                 aliq_nom, deducao, p_icms = tabela[0][3], tabela[0][4], tabela[0][5]
                 for _, ini, fim, nom, ded, p_ic in tabela:
-                    if rbt12_val <= fim:
-                        aliq_nom, deducao, p_icms = nom, ded, p_ic
-                        break
+                    if rbt12_val <= fim: aliq_nom, deducao, p_icms = nom, ded, p_ic; break
                 aliq_ef = ((rbt12_val * aliq_nom) - deducao) / rbt12_val if rbt12_val > 0 else aliq_nom
                 return aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
 
             resumo_cfop = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'Valor_Produto_XML': 'sum',
-                'Base_Tributavel_Item': 'sum'
+                'Valor_Produto_XML': 'sum', 'Base_Tributavel_Item': 'sum'
             }).reset_index()
 
             resumo_cfop['Base_PGDAS_Líquida'] = resumo_cfop.apply(
@@ -188,18 +198,18 @@ def main():
             
             resumo_cfop['Alíquota (%)'] = resumo_cfop['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Resumo Analítico por CFOP")
+            st.subheader("📑 Resumo Analítico por CFOP (Apenas Emissão Própria)")
             st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Valor_Produto_XML', 'Base_PGDAS_Líquida', 'DAS']])
 
             st.markdown("---")
             c1, c2 = st.columns(2)
-            c1.metric("Base PGDAS Líquida", f"R$ {resumo_cfop['Base_PGDAS_Líquida'].sum():,.2f}")
+            c1.metric("Faturamento Líquido Auditado", f"R$ {resumo_cfop['Base_PGDAS_Líquida'].sum():,.2f}")
             c2.metric("Total DAS", f"R$ {resumo_cfop['DAS'].sum():,.2f}")
 
-            st.subheader("📋 Rastreabilidade Geral")
-            st.dataframe(df_fiscal[['Nota', 'Série', 'Modelo', 'CFOP', 'Valor_Produto_XML', 'Base_Tributavel_Item', 'Cancelada', 'Chave']], use_container_width=True)
+            st.subheader("📋 Rastreabilidade Geral (Própria vs Terceiros)")
+            st.dataframe(df[['Nota', 'Origem', 'Série', 'Modelo', 'CFOP', 'Base_Tributavel_Item', 'Cancelada', 'Chave']], use_container_width=True)
         else:
-            st.error("Nenhuma nota processada.")
+            st.error("Nenhuma nota processada. Verifique o CNPJ.")
 
 if __name__ == "__main__":
     main()
