@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Precisão de Arredondamento Global
+Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Correção de Arredondamento Global
 """
 
 import zipfile
@@ -113,6 +113,8 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cl
         registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cli))
     return registros
 
+# ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
+
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
     
@@ -147,7 +149,7 @@ def main():
             ).reset_index()
             st.table(resumo_series)
 
-            # ─── MOTOR DE CÁLCULO FISCAL (PGDAS) ────────────────────────────
+            # ─── MOTOR DE CÁLCULO FISCAL ────────────────────────────────────
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def obter_aliquota(row, rbt12_val):
@@ -160,23 +162,26 @@ def main():
                 aliq_ef = ((rbt12_val * aliq_nom) - deducao) / rbt12_val if rbt12_val > 0 else aliq_nom
                 return aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
 
-            # Agregação Global por CFOP ANTES de calcular o DAS para evitar erro de arredondamento
+            # Agregação Global por CFOP
             resumo_cfop = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
                 'Valor_Produto_XML': 'sum'
             }).reset_index()
 
-            # Aplicação do multiplicador de devolução
+            # Aplicação do multiplicador e arredondamento da base
             resumo_cfop['Base_PGDAS'] = resumo_cfop.apply(
                 lambda x: (x['Valor_Produto_XML'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Valor_Produto_XML']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
             )
 
-            # Cálculo do imposto sobre o total do CFOP (Regra PGDAS)
+            # Cálculo do DAS com correção do AttributeError (usando apply para Decimal individual)
             resumo_cfop['Aliq_Final'] = resumo_cfop.apply(lambda x: obter_aliquota(x, rbt12), axis=1)
-            resumo_cfop['DAS'] = (resumo_cfop['Base_PGDAS'] * resumo_cfop['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            
+            resumo_cfop['DAS'] = resumo_cfop.apply(
+                lambda row: (row['Base_PGDAS'] * row['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
+            )
             
             resumo_cfop['Alíquota (%)'] = resumo_cfop['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Resumo Analítico por CFOP (Arredondamento Global)")
+            st.subheader("📑 Resumo Analítico por CFOP")
             st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Base_PGDAS', 'DAS']])
 
             st.markdown("---")
