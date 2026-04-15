@@ -1,7 +1,7 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
 Foco: Cálculo Automático de Alíquotas PGDAS (13 Casas) e Base vNF Proporcional
-Incluso: Detecção de Intervalo de Notas e Processamento de Matrioscas (ZIP in ZIP)
+Incluso: Detecção de Intervalo por Série, Modelo e Processamento de Matrioscas
 """
 
 import zipfile
@@ -26,11 +26,10 @@ st.markdown("""
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         .memorial-box { background-color: white; padding: 25px; border-radius: 10px; border: 1px solid #d81b60; color: black; line-height: 1.6; }
-        .highlight { color: #d81b60; font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
 
-# ─── REGRAS FISCAIS UNIVERSAIS (ANEXO I - COMÉRCIO) ──────────────────────────
+# ─── REGRAS FISCAIS UNIVERSAIS ──────────────────────────────────────────────
 TABELAS_SIMPLES = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3400")),
@@ -60,6 +59,8 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             return []
             
         n_nota = int(inf.find(f"{ns}ide/{ns}nNF").text)
+        serie = inf.find(f"{ns}ide/{ns}serie").text
+        modelo = inf.find(f"{ns}ide/{ns}mod").text
         v_nf = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
         tipo_op = inf.find(f"{ns}ide/{ns}tpNF").text 
 
@@ -74,7 +75,8 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         for item in itens_nota:
             proporcao = item['valor'] / v_prod_total_nota if v_prod_total_nota > 0 else Decimal("0")
             regs.append({
-                "Nota": n_nota, "Tipo": "SAÍDA" if tipo_op == "1" else "ENTRADA",
+                "Nota": n_nota, "Série": serie, "Modelo": modelo,
+                "Tipo": "SAÍDA" if tipo_op == "1" else "ENTRADA",
                 "CFOP": item['cfop'], "ST": item['cfop'] in CFOPS_ST,
                 "Valor Cru": v_nf * proporcao, "Chave": chave
             })
@@ -83,7 +85,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     return regs
 
 def processar_recursivo(arquivo_bytes, chaves_vistas, cnpj_cli):
-    """Lógica Matriosca: Abre ZIPs dentro de ZIPs e extrai XMLs"""
     registros = []
     try:
         with zipfile.ZipFile(io.BytesIO(arquivo_bytes)) as z:
@@ -95,43 +96,41 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, cnpj_cli):
                     with z.open(nome) as f:
                         registros.extend(processar_recursivo(f.read(), chaves_vistas, cnpj_cli))
     except zipfile.BadZipFile:
-        # Se não for ZIP, tenta ler como XML direto
         registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, cnpj_cli))
     return registros
 
 # ─── INTERFACE E MOTOR DE CÁLCULO ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela - Automação PGDAS (Anexo I)")
+    st.title("🛡️ Sentinela - Auditoria e Memorial (Anexo I)")
     
     if 'reset_key' not in st.session_state:
         st.session_state.reset_key = 0
 
     with st.sidebar:
         st.header("👤 Cliente")
-        cnpj_input = st.text_input("CNPJ", value="", placeholder="00.000.000/0000-00", key=f"cnpj_{st.session_state.reset_key}")
+        cnpj_input = st.text_input("CNPJ", value="", placeholder="CNPJ do Emitente", key=f"cnpj_{st.session_state.reset_key}")
         cnpj_cli = limpar_cnpj(cnpj_input)
         
         st.header("⚙️ Receita Bruta")
-        rbt12_raw = st.text_input("Faturamento RBT12 (12 meses)", value="", placeholder="0,00", key=f"rbt12_{st.session_state.reset_key}")
+        rbt12_raw = st.text_input("Faturamento RBT12", value="", placeholder="0,00", key=f"rbt12_{st.session_state.reset_key}")
         
         if rbt12_raw:
             try:
                 clean_rbt12 = rbt12_raw.replace(".", "").replace(",", ".")
                 rbt12 = Decimal(clean_rbt12)
             except:
-                st.error("Formato de RBT12 inválido.")
+                st.error("RBT12 inválido.")
                 rbt12 = Decimal("0")
         else:
             rbt12 = Decimal("0")
 
-        st.markdown("---")
-        if st.button("🗑️ Limpar Dados e Resetar"):
+        if st.button("🗑️ Limpar Tudo"):
             st.session_state.reset_key += 1
             st.cache_data.clear()
             st.rerun()
 
-    # MOTOR DE ALÍQUOTA (13 CASAS)
+    # CÁLCULO ALÍQUOTA
     aliq_nom, deducao, p_icms = Decimal("0.04"), Decimal("0"), Decimal("0.335")
     for num, ini, fim, nom, ded, perc_icms in TABELAS_SIMPLES:
         if rbt12 <= fim:
@@ -148,55 +147,63 @@ def main():
     aliq_ef_view = aliq_efetiva.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
     aliq_st_view = aliq_st.quantize(Decimal("0.0000000000000001"), ROUND_HALF_UP)
 
-    files = st.file_uploader("Upload XMLs ou ZIPs (Matrioscas)", accept_multiple_files=True, type=["xml", "zip"], key=f"files_{st.session_state.reset_key}")
+    files = st.file_uploader("Upload XMLs/ZIPs", accept_multiple_files=True, type=["xml", "zip"], key=f"files_{st.session_state.reset_key}")
 
-    if st.button("🚀 Gerar Memorial Automático") and files:
+    if st.button("🚀 Executar Auditoria") and files:
         if not cnpj_cli:
-            st.warning("Por favor, informe o CNPJ para filtrar as notas.")
+            st.warning("Informe o CNPJ.")
             return
 
         chaves_vistas, registros = set(), []
         for f in files:
-            # Chama a função recursiva para tratar ZIPs ou XMLs isolados
             registros.extend(processar_recursivo(f.read(), chaves_vistas, cnpj_cli))
         
         if registros:
             df = pd.DataFrame(registros)
             df_saida = df[df["Tipo"] == "SAÍDA"].copy()
             
-            if df_saida.empty:
-                st.warning("Nenhuma nota de SAÍDA encontrada para este CNPJ.")
-                return
+            if not df_saida.empty:
+                st.markdown("### 📊 Dashboard de Intervalos e Faturamento")
+                
+                # Agrupamento de Intervalos por Série e Modelo
+                intervalos = df_saida.groupby(['Modelo', 'Série']).agg(
+                    Primeira_Nota=('Nota', 'min'),
+                    Ultima_Nota=('Nota', 'max'),
+                    Qtd_Notas=('Nota', 'nunique')
+                ).reset_index()
+                
+                # Exibição dos Intervalos
+                cols = st.columns(len(intervalos) if len(intervalos) < 5 else 4)
+                for i, row in intervalos.iterrows():
+                    with cols[i % 4]:
+                        st.metric(f"Série {row['Série']} (Mod {row['Modelo']})", 
+                                  f"{row['Primeira_Nota']} → {row['Ultima_Nota']}",
+                                  f"{row['Qtd_Notas']} notas")
 
-            # IDENTIFICAÇÃO DO INTERVALO DE NOTAS
-            primeira_nota = df_saida["Nota"].min()
-            ultima_nota = df_saida["Nota"].max()
+                # Resumo Fiscal
+                resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor Cru': 'sum'}).reset_index()
+                def aplicar_imposto(row):
+                    base = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
+                    aliq = aliq_st if row['ST'] else aliq_efetiva
+                    return (base * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
-            resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor Cru': 'sum'}).reset_index()
-            
-            def aplicar_imposto(row):
-                base = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
-                aliq = aliq_st if row['ST'] else aliq_efetiva
-                return (base * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                resumo['DAS'] = resumo.apply(aplicar_imposto, axis=1)
+                resumo['Faturamento'] = resumo['Valor Cru'].apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
+                
+                st.markdown("---")
+                c1, c2 = st.columns(2)
+                c1.metric("Faturamento Total Detectado", f"R$ {resumo['Faturamento'].sum():,.2f}")
+                c2.metric("Total DAS Calculado", f"R$ {resumo['DAS'].sum():,.2f}")
 
-            resumo['DAS'] = resumo.apply(aplicar_imposto, axis=1)
-            resumo['Faturamento'] = resumo['Valor Cru'].apply(lambda x: x.quantize(Decimal("0.01"), ROUND_HALF_UP))
-            resumo['Aliq_View'] = resumo['ST'].apply(lambda x: f"{aliq_st_view*100:.13f}%" if x else f"{aliq_ef_view*100:.13f}%")
-
-            st.markdown("### 📊 Dashboard Consolidado")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Faturamento Total", f"R$ {resumo['Faturamento'].sum():,.2f}")
-            c2.metric("DAS Total", f"R$ {resumo['DAS'].sum():,.2f}")
-            c3.metric("Alíquota Efetiva", f"{aliq_ef_view*100:.4f}%")
-            c4.metric("Intervalo de Notas", f"{primeira_nota} a {ultima_nota}")
-
-            st.markdown("### 📑 Resumo Analítico por CFOP")
-            st.table(resumo[['CFOP', 'Faturamento', 'Aliq_View', 'DAS']])
-            
-            st.markdown("### 📋 Rastreabilidade")
-            st.dataframe(df.sort_values("Nota"), use_container_width=True, hide_index=True)
+                st.markdown("### 📑 Detalhamento por CFOP")
+                st.table(resumo[['CFOP', 'Faturamento', 'DAS']])
+                
+                st.markdown("### 📋 Rastreabilidade Completa")
+                st.dataframe(df.sort_values(["Modelo", "Série", "Nota"]), use_container_width=True, hide_index=True)
+            else:
+                st.warning("Sem notas de saída para este CNPJ.")
         else:
-            st.error("Nenhuma nota encontrada no pacote para o CNPJ informado.")
+            st.error("Nenhum dado válido extraído.")
 
 if __name__ == "__main__":
     main()
