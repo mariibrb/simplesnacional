@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - FILTRO DE CONTINUIDADE)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Continuidade Filtrada e Precisão 13 Casas
+Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - RESTAURAÇÃO TOTAL)
+Foco: PGDAS Anexos I e II, Faixas 1-6, Cancelamentos Reais e Devoluções de Venda
 """
 
 import zipfile
@@ -33,24 +33,22 @@ TABELA_ANEXO_II = [
     (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.30"), Decimal("720000.00"), Decimal("0.3200")),
 ]
 
-# Grupos de CFOPs para blindagem fiscal
+# Grupos de CFOPs
 CFOPS_VENDA = {"5101", "5102", "5103", "5105", "5106", "5401", "5403", "5405", "6101", "6102", "6103", "6105", "6106", "6401", "6403", "6404"}
-CFOPS_DEVOL_VENDA_PROPRIA = {"1201", "1202", "1411", "2201", "2202", "2411"}
-CFOPS_DEVOL_VENDA_TERCEIRO = {"5201", "5202", "5411", "6201", "6202", "6411"}
-CFOPS_EXCLUSAO_SOMA = {"5949", "6905", "6209", "6152", "5151", "5152", "6151"}
+CFOPS_DEVOL_VEN_PROPRIA = {"1201", "1202", "1411", "2201", "2202", "2411"}
+CFOPS_DEVOL_VEN_TERCEIRO = {"5201", "5202", "5411", "6201", "6202", "6411"}
+CFOPS_EXCLUSAO_SOMA = {"5949", "6905", "6209", "6152", "5151", "5152", "6151", "1949", "2949"}
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
-# ─── FUNÇÕES DE FORMATAÇÃO E CÁLCULO ─────────────────────────────────────────
+# ─── FUNÇÕES DE FORMATAÇÃO ───────────────────────────────────────────────────
 
 def fmt_br(valor):
-    """Formatação monetária brasileira R$ 1.234,56"""
     try:
         return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return "0,00"
 
 def fmt_aliq(valor):
-    """Formatação de alíquota com 13 casas decimais e vírgula"""
     try:
         val_perc = (valor * Decimal("100")).quantize(Decimal("0.0000000000001"), ROUND_HALF_UP)
         return f"{val_perc:,.13f}".replace(".", ",") + "%"
@@ -79,11 +77,11 @@ def extrair_chaves_cancelamento(conteudo):
     chaves = set()
     try:
         root = ET.fromstring(conteudo.lstrip())
-        ns_nfe = "{http://www.portalfiscal.inf.br/nfe}"
-        for ev in root.findall(f".//{ns_nfe}infEvento"):
-            if ev.find(f"{ns_nfe}tpEvento").text == "110111":
-                chaves.add(ev.find(f"{ns_nfe}chNFe").text)
-        inf = root.find(f".//{ns_nfe}infNFe")
+        ns = "{http://www.portalfiscal.inf.br/nfe}"
+        for ev in root.findall(f".//{ns}infEvento"):
+            if ev.find(f"{ns}tpEvento").text == "110111":
+                chaves.add(ev.find(f"{ns}chNFe").text)
+        inf = root.find(f".//{ns}infNFe")
         if inf is not None: chaves.add(inf.attrib.get('Id', '')[3:])
     except: pass
     return chaves
@@ -92,15 +90,15 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     regs = []
     try:
         root = ET.fromstring(conteudo.lstrip())
-        ns_nfe = "{http://www.portalfiscal.inf.br/nfe}"
-        inf = root.find(f".//{ns_nfe}infNFe")
+        ns = "{http://www.portalfiscal.inf.br/nfe}"
+        inf = root.find(f".//{ns}infNFe")
         if inf is None: return []
         
         chave = inf.attrib.get('Id', '')[3:]
         if not chave or chave in chaves_vistas: return []
         
-        emit_cnpj = limpar_cnpj(inf.find(f"{ns_nfe}emit/{ns_nfe}CNPJ").text)
-        dest_node = inf.find(f"{ns_nfe}dest/{ns_nfe}CNPJ")
+        emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
+        dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
         is_o_emissor_alvo = (emit_cnpj == cnpj_cliente)
@@ -108,51 +106,48 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 
         if not (is_o_emissor_alvo or is_o_destinatario_alvo): return []
             
-        ide = inf.find(f"{ns_nfe}ide")
-        n_nota, serie, modelo = int(ide.find(f"{ns_nfe}nNF").text), ide.find(f"{ns_nfe}serie").text, ide.find(f"{ns_nfe}mod").text
-        tp_nf = ide.find(f"{ns_nfe}tpNF").text 
+        ide = inf.find(f"{ns}ide")
+        n_nota, serie, modelo = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text
+        tp_nf = ide.find(f"{ns}tpNF").text 
 
-        for det in inf.findall(f"{ns_nfe}det"):
-            prod, impo = det.find(f"{ns_nfe}prod"), det.find(f"{ns_nfe}imposto")
-            v_p = Decimal(prod.find(f"{ns_nfe}vProd").text)
-            v_desc = Decimal(prod.find(f"{ns_nfe}vDesc").text) if prod.find(f"{ns_nfe}vDesc") is not None else Decimal("0")
-            v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
-            v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
+        for det in inf.findall(f"{ns}det"):
+            prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
+            v_p = Decimal(prod.find(f"{ns}vProd").text)
+            v_desc = Decimal(prod.find(f"{ns}vDesc").text) if prod.find(f"{ns}vDesc") is not None else Decimal("0")
+            v_outro = Decimal(prod.find(f"{ns}vOutro").text) if prod.find(f"{ns}vOutro") is not None else Decimal("0")
+            v_frete = Decimal(prod.find(f"{ns}vFrete").text) if prod.find(f"{ns}vFrete") is not None else Decimal("0")
             
             v_st, v_ipi = Decimal("0"), Decimal("0")
-            icms = impo.find(f".//{ns_nfe}ICMS")
+            icms = impo.find(f".//{ns}ICMS")
             if icms is not None:
-                vst = icms.find(f".//{ns_nfe}vICMSST")
+                vst = icms.find(f".//{ns}vICMSST")
                 if vst is not None: v_st = Decimal(vst.text)
-            ipi = impo.find(f".//{ns_nfe}IPI")
+            ipi = impo.find(f".//{ns}IPI")
             if ipi is not None:
-                vipi = ipi.find(f".//{ns_nfe}vIPI")
+                vipi = ipi.find(f".//{ns}vIPI")
                 if vipi is not None: v_ipi = Decimal(vipi.text)
 
             v_contabil = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
+            cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
             
-            # ─── HIERARQUIA FISCAL DE CATEGORIZAÇÃO ───
             categoria = "OUTROS"
-            if is_o_emissor_alvo: # Minha emissão
-                if tp_nf == "1": # Saída minha
+            if is_o_emissor_alvo: 
+                if tp_nf == "1": # Saída Própria
                     if cfop in CFOPS_VENDA and cfop not in CFOPS_EXCLUSAO_SOMA:
                         categoria = "RECEITA BRUTA"
-                else: # Entrada minha (devolução própria)
+                else: # Entrada Própria (Devolução Própria)
                     if cfop in CFOPS_DEVOL_VEN_PROPRIA:
                         categoria = "DEVOLUÇÃO VENDA"
-            else: # Emissão de Terceiro
-                if tp_nf == "1" and is_o_destinatario_alvo: # Cliente me devolvendo saída
+            else: # Emissão Terceiro
+                if tp_nf == "1" and is_o_destinatario_alvo: # Cliente devolvendo (Saída dele pra você)
                     if cfop in CFOPS_DEVOL_VEN_TERCEIRO:
                         categoria = "DEVOLUÇÃO VENDA"
 
             regs.append({
                 "Unidade_CNPJ": emit_cnpj if is_o_emissor_alvo else dest_cnpj,
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
-                "CFOP": cfop, "ST": cfop in CFOPS_ST, 
-                "Emitente": emit_cnpj, "Destinatario": dest_cnpj,
-                "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
+                "CFOP": cfop, "ST": cfop in CFOPS_ST, "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
                 "V_Contabil": v_contabil, "V_ST": v_st, "V_IPI": v_ipi,
                 "Base_DAS": base_das, "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": categoria, "Chave": chave
@@ -206,33 +201,32 @@ def main():
         if not cnpj_cli:
             st.error("Informe o CNPJ."); return
 
+        # 1. Processar Cancelamentos (RESTAURADO)
         ch_canc = set()
-        for f in f_canc: ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
+        for f in f_canc: 
+            ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
 
+        # 2. Processar Notas
         ch_vistas, regs = set(), []
-        for f in f_norm: regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, cnpj_cliente=cnpj_cli))
+        for f in f_norm: 
+            regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, cnpj_cliente=cnpj_cli))
         
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
             
-            # Zera valores de notas canceladas ou categoria OUTROS
+            # Zera faturamento de canceladas ou categoria OUTROS
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'Base_DAS']] = Decimal("0")
 
-            # ─── RESUMO DE CONTINUIDADE (FILTRADO PARA DAS) ───
-            st.subheader("📊 Resumo de Continuidade (Somente Base PGDAS)")
-            # Filtro: Só mostra o que for RECEITA BRUTA ou DEVOLUÇÃO VENDA e não estiver cancelado
+            # ─── RESUMO DE CONTINUIDADE (RESTAURADO E FILTRADO) ───
+            st.subheader("📊 Resumo de Continuidade (Somente Base Ativa)")
             df_cont = df[(df['Categoria'].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada'])].copy()
             
             if not df_cont.empty:
                 res_series = df_cont.groupby(['Unidade_CNPJ', 'Categoria', 'Modelo', 'Série']).agg(
-                    Nota_Ini=('Nota', 'min'),
-                    Nota_Fim=('Nota', 'max'),
-                    Qtd=('Nota', 'nunique')
+                    Nota_Ini=('Nota', 'min'), Nota_Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')
                 ).reset_index()
                 st.table(res_series)
-            else:
-                st.info("Nenhuma nota válida para faturamento encontrada nos arquivos.")
 
             # Motor Fiscal Faixas 1-6
             def calcular_aliq_efetiva(row, rb_total):
@@ -253,7 +247,7 @@ def main():
                 res_fisc = df_f.apply(lambda r: calcular_aliq_efetiva(r, rbt12), axis=1, result_type='expand')
                 df_f['Base_F'], df_f['Aliq_F'], df_f['DAS'] = res_fisc[0], res_fisc[1], res_fisc[2]
 
-                st.subheader("📑 Memorial Analítico (Precisão 13 Casas)")
+                st.subheader("📑 Memorial Analítico (13 Casas)")
                 resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'V_Contabil': 'sum', 'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
                 resumo['Aliq_Ef'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
                 
@@ -270,11 +264,11 @@ def main():
                 m2.metric("(-) Devoluções Válidas", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
                 m3.metric("DAS Final", f"R$ {fmt_br(df_f['DAS'].sum())}")
             
-            st.subheader("📋 Auditoria Detalhada")
+            st.subheader("📋 Auditoria Detalhada (Canceladas e Devoluções)")
             df_view = df.copy()
             df_view['V_Contabil'] = df_view['V_Contabil'].apply(fmt_br)
             df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
-            st.dataframe(df_view[['Nota', 'CFOP', 'Emitente', 'Destinatario', 'Categoria', 'Tipo', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota encontrada com o CNPJ informado.")
+            st.dataframe(df_view[['Nota', 'CFOP', 'Categoria', 'V_Contabil', 'Base_DAS', 'Cancelada', 'Chave']], use_container_width=True)
+        else: st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__": main()
