@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Batimento de Precisão com Extrato PGDAS
+Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Controle de Continuidade
 """
 
 import zipfile
@@ -33,7 +33,7 @@ CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
-# ─── ESTILIZAÇÃO ─────────────────────────────────────────────────────────────
+# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
 st.markdown("""
     <style>
@@ -80,23 +80,17 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
             
         ide = inf.find(f"{ns_nfe}ide")
         n_nota, serie, modelo = int(ide.find(f"{ns_nfe}nNF").text), ide.find(f"{ns_nfe}serie").text, ide.find(f"{ns_nfe}mod").text
-        tp_nf, v_nf = ide.find(f"{ns_nfe}tpNF").text, Decimal(inf.find(f"{ns_nfe}total/{ns_nfe}ICMSTot/{ns_nfe}vNF").text)
+        tp_nf = ide.find(f"{ns_nfe}tpNF").text 
 
-        dets = inf.findall(f"{ns_nfe}det")
-        v_prod_total = sum(Decimal(d.find(f"{ns_nfe}prod/{ns_nfe}vProd").text) for d in dets)
-
-        for det in dets:
+        for det in inf.findall(f"{ns_nfe}det"):
             prod = det.find(f"{ns_nfe}prod")
             v_p = Decimal(prod.find(f"{ns_nfe}vProd").text)
             
-            # Trata Descontos e Acréscimos por item (vDesc / vOutro)
             v_desc = Decimal(prod.find(f"{ns_nfe}vDesc").text) if prod.find(f"{ns_nfe}vDesc") is not None else Decimal("0")
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            # Base Tributável Real do Item (vProd - Desc + Outro + Frete)
             base_item = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
             regs.append({
@@ -127,6 +121,8 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cl
         registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cli))
     return registros
 
+# ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
+
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
     
@@ -154,7 +150,16 @@ def main():
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
             df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
 
-            # ─── MOTOR DE CÁLCULO FISCAL (BATIMENTO) ────────────────────────
+            # ─── RESUMO DE CONTINUIDADE (RESTAURADO) ────────────────────────
+            st.subheader("📊 Resumo de Continuidade (Por Tipo e Série)")
+            resumo_series = df.groupby(['Tipo', 'Modelo', 'Série']).agg(
+                Nota_Inicial=('Nota', 'min'),
+                Nota_Final=('Nota', 'max'),
+                Qtd_Notas=('Nota', 'nunique')
+            ).reset_index()
+            st.table(resumo_series)
+
+            # ─── MOTOR DE CÁLCULO FISCAL ────────────────────────────────────
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def obter_aliquota(row, rbt12_val):
