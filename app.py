@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST (CFOP 5401), Matrioscas e Separação Própria/Terceiros
+Foco: PGDAS Anexos I e II, Redução de ST, Dedução de ICMS ST da Base e Matrioscas
 """
 
 import zipfile
@@ -31,7 +31,6 @@ TABELA_ANEXO_II = [
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
-# Incluindo 5401 rigorosamente na lista de ST para gatilho de redução de ICMS
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
 # ─── ESTILIZAÇÃO ─────────────────────────────────────────────────────────────
@@ -86,16 +85,25 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
 
         for det in inf.findall(f"{ns_nfe}det"):
             prod = det.find(f"{ns_nfe}prod")
-            v_p = Decimal(prod.find(f"{ns_nfe}vProd").text)
-            cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
+            imposto = det.find(f"{ns_nfe}imposto")
             
+            v_p = Decimal(prod.find(f"{ns_nfe}vProd").text)
             v_desc = Decimal(prod.find(f"{ns_nfe}vDesc").text) if prod.find(f"{ns_nfe}vDesc") is not None else Decimal("0")
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            # Base Tributável do Item (Líquida de descontos + acessórios)
-            base_item = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            # Captura ICMS ST destacado no item (se houver) para deduzir da base bruta
+            v_st_destacado = Decimal("0")
+            icms_node = imposto.find(f".//{ns_nfe}ICMS")
+            if icms_node is not None:
+                st_node = icms_node.find(f".//{ns_nfe}vICMSST")
+                if st_node is not None:
+                    v_st_destacado = Decimal(st_node.text)
             
+            # Base Tributável Real = (Produtos - Desconto + Outros + Frete) - ICMS ST Destacado
+            base_item = (v_p - v_desc + v_outro + v_frete - v_st_destacado).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            
+            cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             categoria = "OUTROS"
             if emissao_propria and tp_nf == "1":
                 categoria = "RECEITA BRUTA"
@@ -106,7 +114,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if emissao_propria else "TERCEIROS",
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "Valor_Produto_XML": v_p, "Base_Tributavel_Item": base_item,
+                "Valor_Produto_XML": v_p, "Base_Tributavel_Item": base_item, "ST_Abatido": v_st_destacado,
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": categoria, "Chave": chave
             })
@@ -129,7 +137,7 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, chaves_canceladas, cnpj_cl
     return registros
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Multi-Anexo")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -157,8 +165,6 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
-            
-            # Zera faturamento de canceladas e emissão de terceiros
             df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
             df.loc[df['Origem'] == "TERCEIROS", ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
 
@@ -178,11 +184,10 @@ def main():
                 for _, ini, fim, nom, ded, p_ic in tabela:
                     if rbt12_val <= fim: aliq_nom, deducao, p_icms = nom, ded, p_ic; break
                 aliq_ef = ((rbt12_val * aliq_nom) - deducao) / rbt12_val if rbt12_val > 0 else aliq_nom
-                # Redução da parcela de ICMS para CFOPs de ST (incluindo 5401)
                 return aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
 
             resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'Valor_Produto_XML': 'sum', 'Base_Tributavel_Item': 'sum'
+                'Valor_Produto_XML': 'sum', 'Base_Tributavel_Item': 'sum', 'ST_Abatido': 'sum'
             }).reset_index()
 
             resumo['Base_PGDAS'] = resumo.apply(
@@ -193,18 +198,17 @@ def main():
             resumo['DAS'] = resumo.apply(
                 lambda r: (r['Base_PGDAS'] * r['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
             )
-            
             resumo['Aliq_Perc'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Resumo Analítico PGDAS")
-            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Produto_XML', 'Base_PGDAS', 'DAS']])
+            st.subheader("📑 Resumo Analítico PGDAS (Com Abatimento de ST)")
+            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Produto_XML', 'ST_Abatido', 'Base_PGDAS', 'DAS']])
 
             st.markdown("---")
             c1, c2 = st.columns(2)
-            c1.metric("Faturamento Líquido Auditado", f"R$ {resumo['Base_PGDAS'].sum():,.2f}")
+            c1.metric("Faturamento Líquido (Sem ST)", f"R$ {resumo['Base_PGDAS'].sum():,.2f}")
             c2.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
             
-            st.dataframe(df[['Nota', 'Origem', 'CFOP', 'Base_Tributavel_Item', 'Cancelada', 'Chave']], use_container_width=True)
+            st.dataframe(df[['Nota', 'CFOP', 'ST_Abatido', 'Base_Tributavel_Item', 'Cancelada']], use_container_width=True)
         else:
             st.error("Sem dados.")
 
