@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - SEM REDUÇÕES)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Blindagem de Devoluções e Recursividade Matriosca
+Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - BLINDAGEM TOTAL)
+Foco: PGDAS Anexos I e II, Faixas 1-6, Blindagem de Devolução por Identidade de Destinatário
 """
 
 import zipfile
@@ -35,8 +35,7 @@ TABELA_ANEXO_II = [
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
-CFOPS_DEVOLUCAO_COMPRA = {"1203", "1204", "2203", "2204", "5201", "5202", "5411", "6201", "6202", "6411", "6209"}
-CFOPS_EXCLUSAO_DAS = {"5949", "6905", "6209", "6152", "6202", "6411", "5202", "5411", "1203", "1204", "2203", "2204", "5151", "5152", "6151"}
+CFOPS_EXCLUSAO_DAS = {"5949", "6905", "6209", "6152", "6202", "6411", "5201", "5202", "5411", "1203", "1204", "2203", "2204", "5151", "5152", "6151"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
@@ -49,7 +48,6 @@ st.markdown("""
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
         .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
-        .stDataFrame { background-color: white; border-radius: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -88,8 +86,11 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         dest_node = inf.find(f"{ns_nfe}dest/{ns_nfe}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
-        emissao_propria = (emit_cnpj == cnpj_cliente)
-        if cnpj_cliente and not (emit_cnpj == cnpj_cliente or dest_cnpj == cnpj_cliente):
+        is_propria = (emit_cnpj == cnpj_cliente)
+        is_destinataria = (dest_cnpj == cnpj_cliente)
+
+        # Se o cliente não é nem emitente nem destinatário, ignora a nota.
+        if not (is_propria or is_destinataria):
             return []
             
         ide = inf.find(f"{ns_nfe}ide")
@@ -113,25 +114,29 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
                 v_ipi_val = ipi_node.find(f".//{ns_nfe}vIPI")
                 if v_ipi_val is not None: v_ipi = Decimal(v_ipi_val.text)
 
-            valor_contabil_item = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            v_contabil = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
-            # CATEGORIZAÇÃO BLINDADA
+            # ─── HIERARQUIA FISCAL RIGOROSA ───
             categoria = "OUTROS"
-            if emissao_propria and tp_nf == "1":
-                if cfop not in CFOPS_EXCLUSAO_DAS and cfop not in CFOPS_DEVOLUCAO_COMPRA:
+            
+            # 1. RECEITA BRUTA: Deve ser emissão PRÓPRIA e SAÍDA (Tipo 1)
+            if is_propria and tp_nf == "1":
+                if cfop not in CFOPS_EXCLUSAO_DAS:
                     categoria = "RECEITA BRUTA"
-            elif not emissao_propria and tp_nf == "0":
+            
+            # 2. DEVOLUÇÃO VENDA (ABATE DAS): Deve ser ENTRADA (Tipo 0), CFOP de Devolução e VOCÊ ser o DESTINATÁRIO
+            elif is_destinataria and tp_nf == "0":
                 if cfop in CFOPS_DEVOLUCAO_VENDA:
                     categoria = "DEVOLUÇÃO VENDA"
 
             regs.append({
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
-                "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if emissao_propria else "TERCEIROS",
+                "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if is_propria else "TERCEIROS",
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "Valor_Contabil_Item": valor_contabil_item, "Valor_ST_Item": v_st, "Valor_IPI_Item": v_ipi,
-                "Base_DAS_Item": base_das, "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
+                "V_Contabil": v_contabil, "V_ST": v_st, "V_IPI": v_ipi,
+                "Base_DAS": base_das, "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": categoria, "Chave": chave
             })
         chaves_vistas.add(chave)
@@ -159,7 +164,7 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Integral")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -177,9 +182,9 @@ def main():
 
     c_up1, c_up2 = st.columns(2)
     with c_up1:
-        f_norm = st.file_uploader("Upload XMLs Vendas/Entradas", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
+        f_norm = st.file_uploader("Movimentação (Vendas/Entradas)", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
     with c_up2:
-        f_canc = st.file_uploader("Upload XMLs Canceladas", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
+        f_canc = st.file_uploader("Exclusão (Canceladas)", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not cnpj_cli:
@@ -188,8 +193,7 @@ def main():
         # 1. Processar Cancelamentos (Recursivo)
         ch_canc = set()
         for f in f_canc:
-            ch_list = processar_recursivo_generic(f.read(), lambda c: extrair_chaves_cancelamento(c))
-            ch_canc.update(ch_list)
+            ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
 
         # 2. Processar Notas Normais (Recursivo)
         ch_vistas, regs = set(), []
@@ -200,9 +204,8 @@ def main():
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
             
-            # Regra de Ouro: Zera faturamento inválido
-            df.loc[df['Cancelada'] | ((df['Origem'] == "TERCEIROS") & (df['Categoria'] != "DEVOLUÇÃO VENDA")) | (df['Categoria'] == "OUTROS"), 
-                   ['Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_DAS_Item']] = Decimal("0")
+            # Regra de Ouro: Zera faturamento inválido (Canceladas, Outros e Terceiros que não são Devolução de Venda)
+            df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'V_IPI', 'Base_DAS']] = Decimal("0")
 
             # Resumo por Série
             st.subheader("📊 Continuidade por Série")
@@ -219,18 +222,18 @@ def main():
                 ae = ((rb_total * a_nom) - ded) / rb_total if rb_total > 0 else a_nom
                 af = ae * (Decimal("1.0") - p_ic) if row['ST'] else ae
                 mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
-                base_calc = (row['Base_DAS_Item'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                base_calc = (row['Base_DAS'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 return base_calc, af, (base_calc * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             res_fiscal = df_f.apply(lambda r: calcular_aliq_efetiva(r, rbt12), axis=1, result_type='expand')
             df_f['Base_Final'], df_f['Aliq_F'], df_f['DAS'] = res_fiscal[0], res_fiscal[1], res_fiscal[2]
 
-            st.subheader("📑 Memorial Analítico (CFOPS Blindados e Alíquota Efetiva)")
-            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil_Item': 'sum', 'Valor_ST_Item': 'sum', 'Valor_IPI_Item': 'sum', 'Base_Final': 'sum', 'DAS': 'sum'}).reset_index()
+            st.subheader("📑 Memorial Analítico (CFOPS Blindados por Identidade)")
+            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'V_Contabil': 'sum', 'Base_Final': 'sum', 'DAS': 'sum'}).reset_index()
             resumo['Aliq_Ef (%)'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
             resumo['Aliq_Ef (%)'] = resumo['Aliq_Ef (%)'].apply(lambda x: f"{(x*100):.10f}%")
-            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Ef (%)', 'Valor_Contabil_Item', 'Valor_ST_Item', 'Base_Final', 'DAS']])
+            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Ef (%)', 'V_Contabil', 'Base_Final', 'DAS']])
 
             st.markdown("---")
             m1, m2, m3 = st.columns(3)
@@ -239,7 +242,7 @@ def main():
             m3.metric("DAS Líquido Final", f"R$ {df_f['DAS'].sum():,.2f}")
             
             st.subheader("📋 Auditoria Detalhada")
-            st.dataframe(df[['Nota', 'CFOP', 'Valor_Contabil_Item', 'Base_DAS_Item', 'Categoria', 'Tipo', 'Origem', 'Cancelada']], use_container_width=True)
+            st.dataframe(df[['Nota', 'CFOP', 'V_Contabil', 'Base_DAS', 'Categoria', 'Tipo', 'Origem', 'Cancelada']], use_container_width=True)
         else: st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__": main()
