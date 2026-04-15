@@ -1,6 +1,7 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
 Foco: Cálculo Automático de Alíquotas PGDAS (13 Casas) e Base vNF Proporcional
+Incluso: Detecção de Intervalo de Notas (Primeira e Última)
 """
 
 import zipfile
@@ -86,13 +87,11 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 def main():
     st.title("🛡️ Sentinela - Automação PGDAS (Anexo I)")
     
-    # Gerenciamento de Estado para Reset
     if 'reset_key' not in st.session_state:
         st.session_state.reset_key = 0
 
     with st.sidebar:
         st.header("👤 Cliente")
-        # O uso da key dinâmica permite forçar o reset do componente
         cnpj_input = st.text_input("CNPJ", value="", placeholder="00.000.000/0000-00", key=f"cnpj_{st.session_state.reset_key}")
         cnpj_cli = limpar_cnpj(cnpj_input)
         
@@ -101,7 +100,6 @@ def main():
         
         if rbt12_raw:
             try:
-                # Trata formatos como 1.234,56 ou 1234.56
                 clean_rbt12 = rbt12_raw.replace(".", "").replace(",", ".")
                 rbt12 = Decimal(clean_rbt12)
             except:
@@ -116,7 +114,7 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    # ─── MOTOR DE ALÍQUOTA AUTOMÁTICA (13 CASAS) ─────────────────────────────
+    # MOTOR DE ALÍQUOTA
     aliq_nom, deducao, p_icms = Decimal("0.04"), Decimal("0"), Decimal("0.335")
     for num, ini, fim, nom, ded, perc_icms in TABELAS_SIMPLES:
         if rbt12 <= fim:
@@ -152,7 +150,10 @@ def main():
                 st.warning("Nenhuma nota de SAÍDA encontrada para este CNPJ.")
                 return
 
-            # Agrupamento para consolidar faturamento por CFOP
+            # IDENTIFICAÇÃO DO INTERVALO DE NOTAS
+            primeira_nota = df_saida["Nota"].min()
+            ultima_nota = df_saida["Nota"].max()
+
             resumo = df_saida.groupby(['CFOP', 'ST']).agg({'Valor Cru': 'sum'}).reset_index()
             
             def aplicar_imposto(row):
@@ -165,10 +166,12 @@ def main():
             resumo['Aliq_View'] = resumo['ST'].apply(lambda x: f"{aliq_st_view*100:.13f}%" if x else f"{aliq_ef_view*100:.13f}%")
 
             st.markdown("### 📊 Dashboard Consolidado")
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Faturamento Total", f"R$ {resumo['Faturamento'].sum():,.2f}")
             c2.metric("DAS Total", f"R$ {resumo['DAS'].sum():,.2f}")
-            c3.metric("Alíquota Efetiva (Normal)", f"{aliq_ef_view*100:.4f}%")
+            c3.metric("Alíquota Efetiva", f"{aliq_ef_view*100:.4f}%")
+            # Exibição do intervalo detectado
+            c4.metric("Intervalo de Notas", f"{primeira_nota} a {ultima_nota}")
 
             st.markdown("### 📑 Resumo Analítico por CFOP")
             st.table(resumo[['CFOP', 'Faturamento', 'Aliq_View', 'DAS']])
