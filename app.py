@@ -56,6 +56,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         root = ET.fromstring(conteudo.lstrip())
         ns_nfe = "{http://www.portalfiscal.inf.br/nfe}"
         
+        # Detecção de Cancelamento
         if "procEventoNFe" in root.tag or "eventoNFe" in root.tag:
             inf_evento = root.find(f".//{ns_nfe}infEvento")
             if inf_evento is not None:
@@ -87,12 +88,13 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
             prod = det.find(f"{ns_nfe}prod")
             imposto = det.find(f"{ns_nfe}imposto")
             
+            # Valor Contábil Bruto do Item
             v_p = Decimal(prod.find(f"{ns_nfe}vProd").text)
             v_desc = Decimal(prod.find(f"{ns_nfe}vDesc").text) if prod.find(f"{ns_nfe}vDesc") is not None else Decimal("0")
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            # CAPTURA DO ICMS ST DESTACADO PARA SUBTRAÇÃO DA BASE
+            # Captura o Valor ST (ICMS ST destacado)
             v_st_destacado = Decimal("0")
             icms_node = imposto.find(f".//{ns_nfe}ICMS")
             if icms_node is not None:
@@ -100,8 +102,8 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
                 if st_node is not None:
                     v_st_destacado = Decimal(st_node.text)
             
-            # Base Tributável = (Produtos - Desc + Outro + Frete) - ICMS ST Destacado
-            base_item = (v_p - v_desc + v_outro + v_frete - v_st_destacado).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            # A BASE DO DAS: Contábil - ST
+            base_tributavel = (v_p - v_desc + v_outro + v_frete - v_st_destacado).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             categoria = "OUTROS"
@@ -114,7 +116,9 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if emissao_propria else "TERCEIROS",
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "Valor_Produto_XML": v_p, "Base_Tributavel_Item": base_item, "ST_Abatido": v_st_destacado,
+                "Valor_Contabil": v_p + v_outro + v_frete, # Valor Bruto aproximado
+                "Valor_ST": v_st_destacado,
+                "Base_DAS_Item": base_tributavel,
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": categoria, "Chave": chave
             })
@@ -166,18 +170,18 @@ def main():
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(chaves_canceladas)
             
-            # Zera faturamento para canceladas e emissão de terceiros
-            df.loc[df['Cancelada'], ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
-            df.loc[df['Origem'] == "TERCEIROS", ['Valor_Produto_XML', 'Base_Tributavel_Item']] = Decimal("0")
+            # Zera faturamento de canceladas e terceiros
+            df.loc[df['Cancelada'], ['Valor_Contabil', 'Valor_ST', 'Base_DAS_Item']] = Decimal("0")
+            df.loc[df['Origem'] == "TERCEIROS", ['Valor_Contabil', 'Valor_ST', 'Base_DAS_Item']] = Decimal("0")
 
-            # Resumo de Continuidade
-            st.subheader("📊 Continuidade de Notas")
+            # Resumo de Séries
+            st.subheader("📊 Resumo de Continuidade")
             res_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(
                 Ini=('Nota', 'min'), Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')
             ).reset_index()
             st.table(res_series)
 
-            # Motor de Cálculo Fiscal
+            # Cálculo Fiscal
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def obter_aliquota(row, rbt12_val):
@@ -189,30 +193,32 @@ def main():
                 return aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
 
             resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'Valor_Produto_XML': 'sum', 'Base_Tributavel_Item': 'sum', 'ST_Abatido': 'sum'
+                'Valor_Contabil': 'sum', 'Valor_ST': 'sum', 'Base_DAS_Item': 'sum'
             }).reset_index()
 
-            resumo['Base_PGDAS'] = resumo.apply(
-                lambda x: (x['Base_Tributavel_Item'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Base_Tributavel_Item']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
+            resumo['Base_Líquida_DAS'] = resumo.apply(
+                lambda x: (x['Base_DAS_Item'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Base_DAS_Item']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
             )
 
             resumo['Aliq_Final'] = resumo.apply(lambda x: obter_aliquota(x, rbt12), axis=1)
-            resumo['DAS'] = resumo.apply(
-                lambda r: (r['Base_PGDAS'] * r['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
+            resumo['Imposto_DAS'] = resumo.apply(
+                lambda r: (r['Base_Líquida_DAS'] * r['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
             )
             resumo['Aliq_Perc'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Resumo Analítico PGDAS (ICMS ST Deduzido da Base)")
-            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Produto_XML', 'ST_Abatido', 'Base_PGDAS', 'DAS']])
+            st.subheader("📑 Memorial de Cálculo (Base = Contábil - ST)")
+            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil', 'Valor_ST', 'Base_Líquida_DAS', 'Imposto_DAS']])
 
             st.markdown("---")
-            c1, c2 = st.columns(2)
-            c1.metric("Faturamento Líquido (Sem ST)", f"R$ {resumo['Base_PGDAS'].sum():,.2f}")
-            c2.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Contábil Auditado", f"R$ {resumo['Valor_Contabil'].sum():,.2f}")
+            c2.metric("Total ST Abatido", f"R$ {resumo['Valor_ST'].sum():,.2f}")
+            c3.metric("Base Líquida PGDAS", f"R$ {resumo['Base_Líquida_DAS'].sum():,.2f}")
             
-            st.dataframe(df[['Nota', 'CFOP', 'ST_Abatido', 'Base_Tributavel_Item', 'Cancelada']], use_container_width=True)
+            st.subheader("📋 Rastreabilidade de Notas")
+            st.dataframe(df[['Nota', 'CFOP', 'Valor_Contabil', 'Valor_ST', 'Base_DAS_Item', 'Cancelada']], use_container_width=True)
         else:
-            st.error("Nenhuma nota processada.")
+            st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__":
     main()
