@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Gestão de Cancelamentos e Estilo Rihanna
+Foco: PGDAS Anexos I e II, Faixas 1-6, Gestão de Cancelamentos e Filtro de Devoluções de Compra
 """
 
 import zipfile
@@ -35,9 +35,10 @@ TABELA_ANEXO_II = [
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
+CFOPS_DEVOLUCAO_COMPRA = {"1203", "1204", "2203", "2204", "5201", "5202", "6201", "6202", "5411", "6411"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
 
-# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT (RESTAURADO) ───────────────────────────
+# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
 st.markdown("""
     <style>
@@ -47,7 +48,6 @@ st.markdown("""
         h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
         .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
-        .stTable { background-color: rgba(255, 255, 255, 0.5); border-radius: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -99,13 +99,11 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            v_st = Decimal("0")
+            v_st, v_ipi = Decimal("0"), Decimal("0")
             icms_node = imposto.find(f".//{ns_nfe}ICMS")
             if icms_node is not None:
                 st_node = icms_node.find(f".//{ns_nfe}vICMSST")
                 if st_node is not None: v_st = Decimal(st_node.text)
-            
-            v_ipi = Decimal("0")
             ipi_node = imposto.find(f".//{ns_nfe}IPI")
             if ipi_node is not None:
                 v_ipi_val = ipi_node.find(f".//{ns_nfe}vIPI")
@@ -113,8 +111,15 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
 
             valor_contabil_item = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
+            
+            # CATEGORIZAÇÃO RIGOROSA
+            categoria = "OUTROS"
+            if emissao_propria and tp_nf == "1" and cfop not in CFOPS_DEVOLUCAO_COMPRA:
+                categoria = "RECEITA BRUTA"
+            elif not emissao_propria and cfop in CFOPS_DEVOLUCAO_VENDA:
+                categoria = "DEVOLUÇÃO VENDA"
+
             regs.append({
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if emissao_propria else "TERCEIROS",
@@ -124,7 +129,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
                 "Valor_IPI_Item": v_ipi,
                 "Base_DAS_Item": base_das,
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
-                "Categoria": "RECEITA BRUTA" if emissao_propria and tp_nf == "1" else ("DEVOLUÇÃO VENDA" if not emissao_propria and cfop in CFOPS_DEVOLUCAO_VENDA else "OUTROS"),
+                "Categoria": categoria,
                 "Chave": chave
             })
         chaves_vistas.add(chave)
@@ -193,21 +198,19 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
-            df.loc[df['Cancelada'], ['Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_DAS_Item']] = Decimal("0")
-            df.loc[df['Origem'] == "TERCEIROS", ['Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_DAS_Item']] = Decimal("0")
+            # Regra: Zera faturamento de canceladas, terceiros e devoluções de compra (categoria OUTROS)
+            df.loc[df['Cancelada'] | (df['Origem'] == "TERCEIROS") | (df['Categoria'] == "OUTROS"), ['Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_DAS_Item']] = Decimal("0")
 
             # Resumo por Série
             st.subheader("📊 Continuidade por Série")
             st.table(df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(Ini=('Nota', 'min'), Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index())
 
-            # Motor Fiscal de Alíquota Efetiva Progressiva (1 a 6 Faixas)
+            # Motor Fiscal de Alíquota Efetiva Progressiva
             def calcular_aliq_efetiva(row, rb_total):
                 tab = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
                 faixa = tab[0]
                 for f in tab:
-                    if rb_total <= f[2]:
-                        faixa = f
-                        break
+                    if rb_total <= f[2]: faixa = f; break
                     faixa = f
                 
                 _, _, _, a_nom, ded, p_ic = faixa
@@ -226,7 +229,7 @@ def main():
             resumo['Aliq_Perc'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
             resumo['Aliq_Perc'] = resumo['Aliq_Perc'].apply(lambda x: f"{(x*100):.10f}%")
             
-            st.subheader("📑 Memorial Analítico por CFOP (Alíquota Efetiva)")
+            st.subheader("📑 Memorial Analítico por CFOP")
             st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil_Item', 'Valor_ST_Item', 'Base_Final', 'DAS']])
 
             st.markdown("---")
@@ -236,7 +239,7 @@ def main():
             m3.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
             
             st.subheader("📋 Auditoria Detalhada")
-            st.dataframe(df[['Nota', 'Série', 'CFOP', 'Valor_Contabil_Item', 'Base_DAS_Item', 'Cancelada', 'Chave']], use_container_width=True)
+            st.dataframe(df[['Nota', 'Série', 'CFOP', 'Valor_Contabil_Item', 'Base_DAS_Item', 'Cancelada', 'Categoria']], use_container_width=True)
         else:
             st.error("Nenhuma nota encontrada.")
 
