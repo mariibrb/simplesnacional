@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ICMS/ST, Matrioscas e Auditoria de Base
+Foco: PGDAS Anexos I e II, Redução de ICMS/ST, Matrioscas e Auditoria de Base por CFOP
 """
 
 import zipfile
@@ -127,7 +127,7 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, cnpj_cli):
 # ─── INTERFACE E MOTOR DE CÁLCULO ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria de Faturamento Integral")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Integral")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -162,6 +162,9 @@ def main():
                 # Valor proporcional considerando frete/desconto/vNF
                 base_calculo = row['Valor_Proporcional_NF'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 multiplicador = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
+                
+                # Para o XML Bruto também aplicamos o sinal da devolução para bater o líquido
+                xml_bruto = (row['Valor_Produto_XML'] * multiplicador).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 base_final = base_calculo * multiplicador
                 
                 # Seleção de Alíquota Específica
@@ -170,33 +173,36 @@ def main():
                 else:
                     aliq = aliq_st2 if row['ST'] else aliq_ef2
                 
-                return base_final, aliq, (base_final * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                return base_final, aliq, (base_final * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP), xml_bruto
 
             calc_data = df_fiscal.apply(aplicar_logica_fiscal, axis=1, result_type='expand')
-            df_fiscal['Base_Liquida'], df_fiscal['Aliq_Final'], df_fiscal['DAS'] = calc_data[0], calc_data[1], calc_data[2]
+            df_fiscal['Base_Liquida'], df_fiscal['Aliq_Final'], df_fiscal['DAS'], df_fiscal['XML_Bruto_Calc'] = calc_data[0], calc_data[1], calc_data[2], calc_data[3]
 
             # ─── APRESENTAÇÃO DOS DADOS ──────────────────────────────────────
             st.subheader("📊 Resumo Analítico por CFOP e Categoria")
             resumo = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'Valor_Produto_XML': 'sum',
+                'XML_Bruto_Calc': 'sum',
                 'Base_Liquida': 'sum',
                 'DAS': 'sum',
                 'Aliq_Final': 'first'
             }).reset_index()
             
             resumo['Alíquota (%)'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
-            res_show = resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Valor_Produto_XML', 'Base_Liquida', 'DAS']].copy()
+            
+            # Renomeando para clareza na tabela
+            resumo = resumo.rename(columns={'XML_Bruto_Calc': 'Faturamento XML Bruto'})
+            
+            res_show = resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Faturamento XML Bruto', 'Base_Liquida', 'DAS']].copy()
             res_show['ST'] = res_show['ST'].map({True: "SIM", False: "NÃO"})
             st.table(res_show)
 
             st.markdown("---")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Faturamento XML Bruto", f"R$ {df_fiscal['Valor_Produto_XML'].sum():,.2f}")
+            c1.metric("Faturamento XML Bruto Total", f"R$ {df_fiscal['XML_Bruto_Calc'].sum():,.2f}")
             c2.metric("Base PGDAS (vNF Líquido)", f"R$ {df_fiscal['Base_Liquida'].sum():,.2f}")
             c3.metric("Total DAS", f"R$ {df_fiscal['DAS'].sum():,.2f}")
             
             st.subheader("📋 Rastreabilidade de Notas e Séries")
-            # Mostrar intervalos de notas por série para auditoria de pulos
             df_saida = df[df["Categoria"] == "RECEITA BRUTA"]
             if not df_saida.empty:
                 intervalos = df_saida.groupby(['Modelo', 'Série']).agg(
