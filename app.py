@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Gestão de Cancelamentos e Batimento de IPI/ST
+Foco: PGDAS Anexos I e II, Faixas 1-6, Gestão de Cancelamentos e Estilo Rihanna
 """
 
 import zipfile
@@ -14,7 +14,7 @@ import pandas as pd
 # Precisão de 60 casas para cálculos fiscais de alta fidelidade
 getcontext().prec = 60 
 
-# ─── REGRAS FISCAIS UNIVERSAIS (EXPANDIDAS PARA 6 FAIXAS) ────────────────────
+# ─── REGRAS FISCAIS UNIVERSAIS (6 FAIXAS COMPLETAS) ─────────────────────────
 TABELA_ANEXO_I = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3350")),
@@ -36,6 +36,20 @@ TABELA_ANEXO_II = [
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
+
+# ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT (RESTAURADO) ───────────────────────────
+st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
+st.markdown("""
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
+        html, body, [class*="css"] { font-family: 'Montserrat', sans-serif; }
+        .stApp { background: radial-gradient(circle at top center, #ffe6f0 0%, #ffb3d1 100%); color: #4a0024; }
+        h1, h2, h3, h4 { color: #d81b60 !important; font-weight: 800; }
+        .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
+        .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
+        .stTable { background-color: rgba(255, 255, 255, 0.5); border-radius: 10px; }
+    </style>
+""", unsafe_allow_html=True)
 
 # ─── FUNÇÕES DE APOIO ────────────────────────────────────────────────────────
 
@@ -79,9 +93,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         tp_nf = ide.find(f"{ns_nfe}tpNF").text 
 
         for det in inf.findall(f"{ns_nfe}det"):
-            prod = det.find(f"{ns_nfe}prod")
-            imposto = det.find(f"{ns_nfe}imposto")
-            
+            prod, imposto = det.find(f"{ns_nfe}prod"), det.find(f"{ns_nfe}imposto")
             v_p = Decimal(prod.find(f"{ns_nfe}vProd").text)
             v_desc = Decimal(prod.find(f"{ns_nfe}vDesc").text) if prod.find(f"{ns_nfe}vDesc") is not None else Decimal("0")
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
@@ -140,7 +152,7 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Rihanna Mode")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -149,8 +161,7 @@ def main():
         cnpj_cli = limpar_cnpj(st.text_input("CNPJ", key=f"c_{st.session_state.reset_key}"))
         
         st.header("⚙️ Parâmetros PGDAS")
-        rbt12_raw = st.text_input("RBT12 Total", value="", key=f"r_{st.session_state.reset_key}")
-        # Sanitização robusta do RBT12
+        rbt12_raw = st.text_input("RBT12 Total (6 faixas)", value="", key=f"r_{st.session_state.reset_key}")
         rbt12_clean = rbt12_raw.replace(".", "").replace(",", ".")
         rbt12 = Decimal(rbt12_clean) if rbt12_clean else Decimal("0")
         
@@ -160,9 +171,9 @@ def main():
 
     c_up1, c_up2 = st.columns(2)
     with c_up1:
-        f_norm = st.file_uploader("XMLs Vendas/Entradas", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
+        f_norm = st.file_uploader("Upload XMLs Vendas/Entradas", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
     with c_up2:
-        f_canc = st.file_uploader("XMLs Canceladas", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
+        f_canc = st.file_uploader("Upload XMLs Canceladas", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not cnpj_cli:
@@ -187,32 +198,21 @@ def main():
 
             # Resumo por Série
             st.subheader("📊 Continuidade por Série")
-            res_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(Ini=('Nota', 'min'), Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index()
-            st.table(res_series)
+            st.table(df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(Ini=('Nota', 'min'), Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index())
 
-            # Motor Fiscal de Alíquota Efetiva Progressiva
+            # Motor Fiscal de Alíquota Efetiva Progressiva (1 a 6 Faixas)
             def calcular_aliq_efetiva(row, rb_total):
                 tab = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
-                
-                # Identifica a faixa correta percorrendo a tabela
                 faixa = tab[0]
                 for f in tab:
                     if rb_total <= f[2]:
                         faixa = f
                         break
-                    faixa = f # Se maior que a última, mantém a última (6ª faixa)
+                    faixa = f
                 
                 _, _, _, a_nom, ded, p_ic = faixa
-                
-                # Fórmula da Alíquota Efetiva
-                if rb_total > 0:
-                    ae = ((rb_total * a_nom) - ded) / rb_total
-                else:
-                    ae = a_nom
-                
-                # Redução de ICMS para Substituição Tributária
+                ae = ((rb_total * a_nom) - ded) / rb_total if rb_total > 0 else a_nom
                 a_final = ae * (Decimal("1.0") - p_ic) if row['ST'] else ae
-                
                 mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
                 base_calc = (row['Base_DAS_Item'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
                 
@@ -226,7 +226,7 @@ def main():
             resumo['Aliq_Perc'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
             resumo['Aliq_Perc'] = resumo['Aliq_Perc'].apply(lambda x: f"{(x*100):.10f}%")
             
-            st.subheader("📑 Memorial Analítico por CFOP")
+            st.subheader("📑 Memorial Analítico por CFOP (Alíquota Efetiva)")
             st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil_Item', 'Valor_ST_Item', 'Base_Final', 'DAS']])
 
             st.markdown("---")
