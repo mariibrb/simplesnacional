@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - CORREÇÃO DE SOMA)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Rigor de Identidade de CNPJ e Estilo Rihanna
+Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - RESTAURAÇÃO 6108)
+Foco: PGDAS Anexos I e II, Faixas 1-6, Inclusão de 6108/6107 e Blindagem de CNPJ
 """
 
 import zipfile
@@ -33,8 +33,12 @@ TABELA_ANEXO_II = [
     (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.30"), Decimal("720000.00"), Decimal("0.3200")),
 ]
 
-# Grupos de CFOPs para blindagem fiscal
-CFOPS_VENDA = {"5101", "5102", "5103", "5105", "5106", "5401", "5403", "5405", "6101", "6102", "6103", "6105", "6106", "6401", "6403", "6404"}
+# Grupos de CFOPs para blindagem fiscal (RESTAURADO 6108/6107/5108/5107)
+CFOPS_VENDA = {
+    "5101", "5102", "5103", "5105", "5106", "5107", "5108",
+    "6101", "6102", "6103", "6105", "6106", "6107", "6108",
+    "5401", "5403", "5405", "6401", "6403", "6404"
+}
 CFOPS_DEVOL_VEN_PROPRIA = {"1201", "1202", "1411", "2201", "2202", "2411"}
 CFOPS_DEVOL_VEN_TERCEIRO = {"5201", "5202", "5411", "6201", "6202", "6411"}
 CFOPS_EXCLUSAO_SOMA = {"5949", "6905", "6209", "6152", "5151", "5152", "6151", "1949", "2949"}
@@ -104,7 +108,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         is_o_emissor_alvo = (emit_cnpj == cnpj_cliente)
         is_o_destinatario_alvo = (dest_cnpj == cnpj_cliente)
 
-        # Se o CNPJ auditado não participa da nota, ignora
         if not (is_o_emissor_alvo or is_o_destinatario_alvo): return []
             
         ide = inf.find(f"{ns}ide")
@@ -133,15 +136,17 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
             
             categoria = "OUTROS"
-            # REGRA DE RECEITA BRUTA: Deve ser Emissor e Saída (1)
-            if is_o_emissor_alvo and tp_nf == "1":
-                if cfop in CFOPS_VENDA and cfop not in CFOPS_EXCLUSAO_SOMA:
-                    categoria = "RECEITA BRUTA"
-            
-            # REGRA DE DEVOLUÇÃO: Minha Entrada própria OU Saída de Terceiro contra mim
-            if cfop in CFOPS_DEVOL_VEN_PROPRIA or cfop in CFOPS_DEVOL_VEN_TERCEIRO:
-                if (is_o_emissor_alvo and tp_nf == "0") or (is_o_destinatario_alvo and tp_nf == "1"):
-                    categoria = "DEVOLUÇÃO VENDA"
+            if is_o_emissor_alvo: 
+                if tp_nf == "1": # Saída Própria
+                    if cfop in CFOPS_VENDA and cfop not in CFOPS_EXCLUSAO_SOMA:
+                        categoria = "RECEITA BRUTA"
+                else: # Entrada Própria (Devolução Própria)
+                    if cfop in CFOPS_DEVOL_VEN_PROPRIA:
+                        categoria = "DEVOLUÇÃO VENDA"
+            else: # Emissão Terceiro
+                if tp_nf == "1" and is_o_destinatario_alvo: # Cliente devolvendo para mim
+                    if cfop in CFOPS_DEVOL_VEN_TERCEIRO:
+                        categoria = "DEVOLUÇÃO VENDA"
 
             regs.append({
                 "Unidade_CNPJ": emit_cnpj if is_o_emissor_alvo else dest_cnpj,
@@ -187,7 +192,6 @@ def main():
         rbt12_raw = st.text_input("RBT12 Total", value="", key=f"r_{st.session_state.reset_key}")
         rbt12_clean = rbt12_raw.replace(".", "").replace(",", ".")
         rbt12 = Decimal(rbt12_clean) if rbt12_clean else Decimal("0")
-        
         if st.button("🗑️ Resetar Tudo"):
             st.session_state.reset_key += 1
             st.rerun()
@@ -209,8 +213,6 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
-            
-            # Zera faturamento de canceladas ou categoria OUTROS
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'Base_DAS']] = Decimal("0")
 
             st.subheader("📊 Resumo de Continuidade (Somente Base Ativa)")
@@ -252,11 +254,11 @@ def main():
                 m2.metric("(-) Devoluções Válidas", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
                 m3.metric("DAS Final", f"R$ {fmt_br(df_f['DAS'].sum())}")
             
-            st.subheader("📋 Auditoria Detalhada (Log de Emitentes)")
+            st.subheader("📋 Auditoria Detalhada")
             df_view = df.copy()
             df_view['V_Contabil'] = df_view['V_Contabil'].apply(fmt_br)
             df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
             st.dataframe(df_view[['Nota', 'CFOP', 'Emitente', 'Destinatário', 'Categoria', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota encontrada com o CNPJ alvo informado.")
+        else: st.error("Nenhuma nota encontrada com o CNPJ alvo.")
 
 if __name__ == "__main__": main()
