@@ -1,7 +1,7 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo
-Versão: Multi-Anexo (I e II) - Integral e Detalhada
-Foco: Segregação automática por CFOP, Matrioscas e Alíquotas 13 casas
+Versão: Multi-Anexo com Redução de ICMS ST - Integral
+Foco: Segregação Anexo I e II, Redução de ST e Matrioscas
 """
 
 import zipfile
@@ -12,24 +12,24 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão de 60 casas para cálculos fiscais
+# Precisão de 60 casas para fidelidade ao PGDAS
 getcontext().prec = 60 
 
 # ─── REGRAS FISCAIS UNIVERSAIS ──────────────────────────────────────────────
-# ANEXO I - COMÉRCIO
+# ANEXO I - COMÉRCIO (Partilha ICMS: 33,5%)
 TABELA_ANEXO_I = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
-    (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3400")),
+    (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3350")),
     (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.095"), Decimal("13860.00"), Decimal("0.3350")),
     (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00"), Decimal("0.3350")),
 ]
 
-# ANEXO II - INDÚSTRIA
+# ANEXO II - INDÚSTRIA (Partilha ICMS: 32,0%)
 TABELA_ANEXO_II = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.045"), Decimal("0.00"), Decimal("0.3200")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.078"), Decimal("5940.00"), Decimal("0.3200")),
-    (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.10"), Decimal("13860.00"), Decimal("0.3250")),
-    (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.112"), Decimal("22500.00"), Decimal("0.3250")),
+    (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.10"), Decimal("13860.00"), Decimal("0.3200")),
+    (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.112"), Decimal("22500.00"), Decimal("0.3200")),
 ]
 
 CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
@@ -50,17 +50,16 @@ st.markdown("""
 
 # ─── FUNÇÕES DE APOIO ────────────────────────────────────────────────────────
 
-def calcular_aliq_efetiva(rbt12, tabela):
+def calcular_dados_pgdas(rbt12, tabela):
+    """Calcula Alíquota Efetiva e Parcela de ICMS para redução"""
     aliq_nom, deducao, p_icms = tabela[0][3], tabela[0][4], tabela[0][5]
     for _, ini, fim, nom, ded, p_ic in tabela:
         if rbt12 <= fim:
             aliq_nom, deducao, p_icms = nom, ded, p_ic
             break
-    if rbt12 > 0:
-        efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12
-    else:
-        efetiva = aliq_nom
-    return efetiva, p_icms
+    
+    aliq_efetiva = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else aliq_nom
+    return aliq_efetiva, p_icms
 
 def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     regs = []
@@ -123,7 +122,7 @@ def processar_recursivo(arquivo_bytes, chaves_vistas, cnpj_cli):
 # ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Multi-Anexo")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Multi-Anexo & ST")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -137,11 +136,11 @@ def main():
             st.session_state.reset_key += 1
             st.rerun()
 
-    # Cálculo das Alíquotas por Anexo
-    aliq_ef1, p_icms1 = calcular_aliq_efetiva(rbt12, TABELA_ANEXO_I)
+    # Cálculo Prévio das Alíquotas e Percentuais de ICMS por Anexo
+    aliq_ef1, p_icms1 = calcular_dados_pgdas(rbt12, TABELA_ANEXO_I)
     aliq_st1 = aliq_ef1 * (Decimal("1.0") - p_icms1)
     
-    aliq_ef2, p_icms2 = calcular_aliq_efetiva(rbt12, TABELA_ANEXO_II)
+    aliq_ef2, p_icms2 = calcular_dados_pgdas(rbt12, TABELA_ANEXO_II)
     aliq_st2 = aliq_ef2 * (Decimal("1.0") - p_icms2)
 
     files = st.file_uploader("Upload XMLs/ZIPs", accept_multiple_files=True, type=["xml", "zip"], key=f"f_{st.session_state.reset_key}")
@@ -154,11 +153,11 @@ def main():
             df = pd.DataFrame(regs)
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             
-            # Aplicação das Alíquotas Específicas
-            def calcular_das(row):
+            def calcular_fiscal(row):
                 base = row['Valor Cru'].quantize(Decimal("0.01"), ROUND_HALF_UP)
                 if row['Categoria'] == "DEVOLUÇÃO VENDA": base *= -1
                 
+                # Seleção de Alíquota com Redução de ICMS se for ST
                 if row['Anexo'] == "ANEXO I":
                     aliq = aliq_st1 if row['ST'] else aliq_ef1
                 else:
@@ -166,24 +165,28 @@ def main():
                 
                 return base, aliq, (base * aliq).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
-            res_vals = df_fiscal.apply(calcular_das, axis=1, result_type='expand')
-            df_fiscal['Base'], df_fiscal['Aliq_Usada'], df_fiscal['DAS'] = res_vals[0], res_vals[1], res_vals[2]
+            calc_res = df_fiscal.apply(calcular_fiscal, axis=1, result_type='expand')
+            df_fiscal['Base'], df_fiscal['Aliq_Usada'], df_fiscal['DAS'] = calc_res[0], calc_res[1], calc_res[2]
 
-            st.markdown("### 📑 Memorial Segregado por Anexo e CFOP")
+            st.markdown("### 📑 Memorial Segregado com Redução de ST")
             resumo = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Base': 'sum', 'DAS': 'sum', 'Aliq_Usada': 'first'}).reset_index()
             resumo['Alíquota (%)'] = resumo['Aliq_Usada'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.table(resumo[['Anexo', 'CFOP', 'Categoria', 'Alíquota (%)', 'Base', 'DAS']])
+            # Formatação para tabela
+            res_table = resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Base', 'DAS']].copy()
+            res_table['ST'] = res_table['ST'].map({True: "SIM (Reduzido)", False: "NÃO"})
+            
+            st.table(res_table)
 
             st.markdown("---")
             c1, c2 = st.columns(2)
-            c1.metric("Total Base (Líquida)", f"R$ {df_fiscal['Base'].sum():,.2f}")
-            c2.metric("Total DAS", f"R$ {df_fiscal['DAS'].sum():,.2f}")
+            c1.metric("Base de Cálculo Líquida", f"R$ {df_fiscal['Base'].sum():,.2f}")
+            c2.metric("DAS Total a Recolher", f"R$ {df_fiscal['DAS'].sum():,.2f}")
             
             st.markdown("### 📋 Rastreabilidade")
             st.dataframe(df.sort_values(["Anexo", "Nota"]), use_container_width=True)
         else:
-            st.error("Nenhum dado encontrado.")
+            st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__":
     main()
