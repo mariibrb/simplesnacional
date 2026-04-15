@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Base de Cálculo Fixa vProd
+Foco: PGDAS Anexos I e II, Redução de ST, Matrioscas e Precisão de Arredondamento Global
 """
 
 import zipfile
@@ -58,10 +58,11 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
         
         if "procEventoNFe" in root.tag or "eventoNFe" in root.tag:
             inf_evento = root.find(f".//{ns_nfe}infEvento")
-            tp_evento = inf_evento.find(f"{ns_nfe}tpEvento").text
-            if tp_evento == "110111": 
-                ch_canc = inf_evento.find(f"{ns_nfe}chNFe").text
-                chaves_canceladas.add(ch_canc)
+            if inf_evento is not None:
+                tp_evento = inf_evento.find(f"{ns_nfe}tpEvento").text
+                if tp_evento == "110111": 
+                    ch_canc = inf_evento.find(f"{ns_nfe}chNFe").text
+                    chaves_canceladas.add(ch_canc)
             return []
 
         inf = root.find(f".//{ns_nfe}infNFe")
@@ -85,7 +86,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
             v_p = Decimal(det.find(f"{ns_nfe}prod/{ns_nfe}vProd").text)
             cfop = det.find(f"{ns_nfe}prod/{ns_nfe}CFOP").text.replace(".", "")
             
-            # AJUSTE CRÍTICO: Base de Cálculo agora é EXATAMENTE o vProd
             regs.append({
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, 
@@ -147,45 +147,45 @@ def main():
             ).reset_index()
             st.table(resumo_series)
 
-            # Memorial Fiscal
+            # ─── MOTOR DE CÁLCULO FISCAL (PGDAS) ────────────────────────────
             df_fiscal = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
-            def aplicar_logica_fiscal(row):
-                multiplicador = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
-                # Base de Cálculo é estritamente o valor do produto agora
-                base_final = (row['Valor_Produto_XML'] * multiplicador).quantize(Decimal("0.01"), ROUND_HALF_UP)
-                
+            def obter_aliquota(row, rbt12_val):
                 tabela = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
                 aliq_nom, deducao, p_icms = tabela[0][3], tabela[0][4], tabela[0][5]
                 for _, ini, fim, nom, ded, p_ic in tabela:
-                    if rbt12 <= fim: aliq_nom, deducao, p_icms = nom, ded, p_ic; break
-                
-                aliq_ef = ((rbt12 * aliq_nom) - deducao) / rbt12 if rbt12 > 0 else aliq_nom
-                aliq_final = aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
-                
-                return base_final, aliq_final, (base_final * aliq_final).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                    if rbt12_val <= fim:
+                        aliq_nom, deducao, p_icms = nom, ded, p_ic
+                        break
+                aliq_ef = ((rbt12_val * aliq_nom) - deducao) / rbt12_val if rbt12_val > 0 else aliq_nom
+                return aliq_ef * (Decimal("1.0") - p_icms) if row['ST'] else aliq_ef
 
-            calc_data = df_fiscal.apply(aplicar_logica_fiscal, axis=1, result_type='expand')
-            df_fiscal['Base_Calculo'], df_fiscal['Aliq_Final'], df_fiscal['DAS'] = calc_data[0], calc_data[1], calc_data[2]
-
-            st.subheader("📑 Resumo Analítico por CFOP")
+            # Agregação Global por CFOP ANTES de calcular o DAS para evitar erro de arredondamento
             resumo_cfop = df_fiscal.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({
-                'Valor_Produto_XML': 'sum', 'Base_Calculo': 'sum', 'DAS': 'sum', 'Aliq_Final': 'first'
+                'Valor_Produto_XML': 'sum'
             }).reset_index()
+
+            # Aplicação do multiplicador de devolução
+            resumo_cfop['Base_PGDAS'] = resumo_cfop.apply(
+                lambda x: (x['Valor_Produto_XML'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Valor_Produto_XML']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1
+            )
+
+            # Cálculo do imposto sobre o total do CFOP (Regra PGDAS)
+            resumo_cfop['Aliq_Final'] = resumo_cfop.apply(lambda x: obter_aliquota(x, rbt12), axis=1)
+            resumo_cfop['DAS'] = (resumo_cfop['Base_PGDAS'] * resumo_cfop['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            
             resumo_cfop['Alíquota (%)'] = resumo_cfop['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            # Ajuste de sinal visual para o XML Bruto no resumo
-            resumo_cfop['XML_Bruto_Show'] = resumo_cfop.apply(lambda x: x['Valor_Produto_XML'] * -1 if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Valor_Produto_XML'], axis=1)
-            
-            st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'XML_Bruto_Show', 'Base_Calculo', 'DAS']])
+            st.subheader("📑 Resumo Analítico por CFOP (Arredondamento Global)")
+            st.table(resumo_cfop[['Anexo', 'CFOP', 'ST', 'Categoria', 'Alíquota (%)', 'Base_PGDAS', 'DAS']])
 
             st.markdown("---")
             c1, c2 = st.columns(2)
-            c1.metric("Base PGDAS Líquida (vProd)", f"R$ {df_fiscal['Base_Calculo'].sum():,.2f}")
-            c2.metric("Total DAS", f"R$ {df_fiscal['DAS'].sum():,.2f}")
+            c1.metric("Base PGDAS Total", f"R$ {resumo_cfop['Base_PGDAS'].sum():,.2f}")
+            c2.metric("Total DAS", f"R$ {resumo_cfop['DAS'].sum():,.2f}")
 
             st.subheader("📋 Rastreabilidade Geral")
-            st.dataframe(df_fiscal[['Nota', 'Série', 'Modelo', 'CFOP', 'Base_Calculo', 'Cancelada', 'Chave']], use_container_width=True)
+            st.dataframe(df_fiscal[['Nota', 'Série', 'Modelo', 'CFOP', 'Valor_Produto_XML', 'Cancelada', 'Chave']], use_container_width=True)
         else:
             st.error("Nenhuma nota processada.")
 
