@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Dedução de ICMS ST da Base e Matrioscas
+Foco: PGDAS Anexos I e II, Redução de ST, Dedução de ICMS ST da Base e Batimento de Precisão
 """
 
 import zipfile
@@ -92,7 +92,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            # Captura ICMS ST destacado no item (se houver) para deduzir da base bruta
+            # Rigor na captura de vICMSST
             v_st_destacado = Decimal("0")
             icms_node = imposto.find(f".//{ns_nfe}ICMS")
             if icms_node is not None:
@@ -100,7 +100,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, chaves_canceladas, cnpj_cliente):
                 if st_node is not None:
                     v_st_destacado = Decimal(st_node.text)
             
-            # Base Tributável Real = (Produtos - Desconto + Outros + Frete) - ICMS ST Destacado
+            # Base Tributável Item = (vProd - vDesc + vOutro + vFrete) - vICMSST
             base_item = (v_p - v_desc + v_outro + v_frete - v_st_destacado).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
@@ -200,12 +200,12 @@ def main():
             )
             resumo['Aliq_Perc'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Resumo Analítico PGDAS (Com Abatimento de ST)")
+            st.subheader("📑 Resumo Analítico PGDAS (Batimento com Subtração de ST)")
             st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Produto_XML', 'ST_Abatido', 'Base_PGDAS', 'DAS']])
 
             st.markdown("---")
             c1, c2 = st.columns(2)
-            c1.metric("Faturamento Líquido (Sem ST)", f"R$ {resumo['Base_PGDAS'].sum():,.2f}")
+            c1.metric("Faturamento Líquido (Auditado)", f"R$ {resumo['Base_PGDAS'].sum():,.2f}")
             c2.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
             
             st.dataframe(df[['Nota', 'CFOP', 'ST_Abatido', 'Base_Tributavel_Item', 'Cancelada']], use_container_width=True)
