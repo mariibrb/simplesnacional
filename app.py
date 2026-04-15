@@ -1,6 +1,6 @@
 """
 Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL)
-Foco: PGDAS Anexos I e II, Redução de ST, Gestão de Cancelamentos via Upload e Matrioscas
+Foco: PGDAS Anexos I e II, Redução de ST, Gestão de Cancelamentos e Inclusão de IPI no Contábil
 """
 
 import zipfile
@@ -55,15 +55,11 @@ def extrair_chaves_cancelamento(conteudo):
     try:
         root = ET.fromstring(conteudo.lstrip())
         ns_nfe = "{http://www.portalfiscal.inf.br/nfe}"
-        # Busca em Eventos de Cancelamento
         for inf_evento in root.findall(f".//{ns_nfe}infEvento"):
             tp_ev = inf_evento.find(f"{ns_nfe}tpEvento").text
-            if tp_ev == "110111":
-                chaves.add(inf_evento.find(f"{ns_nfe}chNFe").text)
-        # Busca em Notas Fiscais (se subirem o XML da nota como cancelada)
+            if tp_ev == "110111": chaves.add(inf_evento.find(f"{ns_nfe}chNFe").text)
         inf_nfe = root.find(f".//{ns_nfe}infNFe")
-        if inf_nfe is not None:
-            chaves.add(inf_nfe.attrib.get('Id', '')[3:])
+        if inf_nfe is not None: chaves.add(inf_nfe.attrib.get('Id', '')[3:])
     except: pass
     return chaves
 
@@ -72,7 +68,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
     try:
         root = ET.fromstring(conteudo.lstrip())
         ns_nfe = "{http://www.portalfiscal.inf.br/nfe}"
-        
         inf = root.find(f".//{ns_nfe}infNFe")
         if inf is None: return []
         
@@ -100,23 +95,35 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            # Captura ICMS ST para abatimento da Base Contábil
+            # Captura ICMS ST
             v_st = Decimal("0")
             icms_node = imposto.find(f".//{ns_nfe}ICMS")
             if icms_node is not None:
                 st_node = icms_node.find(f".//{ns_nfe}vICMSST")
                 if st_node is not None: v_st = Decimal(st_node.text)
             
-            base_item = (v_p - v_desc + v_outro + v_frete - v_st).quantize(Decimal("0.01"), ROUND_HALF_UP)
-            cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
+            # Captura IPI (Crucial para o Valor Contábil Industrial)
+            v_ipi = Decimal("0")
+            ipi_node = imposto.find(f".//{ns_nfe}IPI")
+            if ipi_node is not None:
+                v_ipi_val = ipi_node.find(f".//{ns_nfe}vIPI")
+                if v_ipi_val is not None: v_ipi = Decimal(v_ipi_val.text)
+
+            # VALOR CONTÁBIL = Prod + IPI + ST + Outros + Frete - Desc
+            valor_contabil_item = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
+            # BASE DAS = (Contábil - IPI - ST) -> Para bater com PGDAS
+            base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            
+            cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             regs.append({
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, "Origem": "PRÓPRIA" if emissao_propria else "TERCEIROS",
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "Valor_Contabil": v_p + v_outro + v_frete,
-                "Valor_ST": v_st,
-                "Base_DAS_Item": base_item,
+                "Valor_Contabil_Item": valor_contabil_item,
+                "Valor_ST_Item": v_st,
+                "Valor_IPI_Item": v_ipi,
+                "Base_DAS_Item": base_das,
                 "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": "RECEITA BRUTA" if emissao_propria and tp_nf == "1" else ("DEVOLUÇÃO VENDA" if not emissao_propria and cfop in CFOPS_DEVOLUCAO_VENDA else "OUTROS"),
                 "Chave": chave
@@ -147,7 +154,7 @@ def processar_recursivo_notas(arquivo_bytes, chaves_vistas, cnpj_cli):
     except: registros.extend(extrair_dados_xml(arquivo_bytes, chaves_vistas, cnpj_cli))
     return registros
 
-# ─── INTERFACE E MOTOR PRINCIPAL ─────────────────────────────────────────────
+# ─── INTERFACE ───────────────────────────────────────────────────────────────
 
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria e Memorial")
@@ -166,39 +173,32 @@ def main():
 
     c_up1, c_up2 = st.columns(2)
     with c_up1:
-        f_norm = st.file_uploader("Upload XMLs Vendas/Entradas", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
+        f_norm = st.file_uploader("XMLs Vendas/Entradas", accept_multiple_files=True, type=["xml", "zip"], key=f"f1_{st.session_state.reset_key}")
     with c_up2:
-        f_canc = st.file_uploader("Upload XMLs Canceladas", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
+        f_canc = st.file_uploader("XMLs Canceladas", accept_multiple_files=True, type=["xml", "zip"], key=f"f2_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not cnpj_cli:
-            st.error("Informe o CNPJ.")
-            return
+            st.error("Informe o CNPJ."); return
 
-        # 1. Mapear chaves canceladas
         ch_canceladas = set()
         for f in f_canc: ch_canceladas.update(processar_recursivo_cancelamento(f.read()))
 
-        # 2. Processar notas
         ch_vistas, regs = set(), []
         for f in f_norm: regs.extend(processar_recursivo_notas(f.read(), ch_vistas, cnpj_cli))
         
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canceladas)
-            
-            # Zera faturamento de canceladas e terceiros (exceto devolução tributável)
-            df.loc[df['Cancelada'], ['Valor_Contabil', 'Valor_ST', 'Base_DAS_Item']] = Decimal("0")
-            df.loc[df['Origem'] == "TERCEIROS", ['Valor_Contabil', 'Valor_ST', 'Base_DAS_Item']] = Decimal("0")
+            df.loc[df['Cancelada'], ['Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_DAS_Item']] = Decimal("0")
+            df.loc[df['Origem'] == "TERCEIROS", ['Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_DAS_Item']] = Decimal("0")
 
-            # ─── RESUMO DE CONTINUIDADE (TIPO E SÉRIE) ───
-            st.subheader("📊 Resumo de Continuidade por Tipo e Série")
-            res_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(
-                Nota_Inicial=('Nota', 'min'), Nota_Final=('Nota', 'max'), Qtd_Notas=('Nota', 'nunique')
-            ).reset_index()
+            # Resumo por Série
+            st.subheader("📊 Continuidade por Série")
+            res_series = df.groupby(['Origem', 'Tipo', 'Modelo', 'Série']).agg(Ini=('Nota', 'min'), Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index()
             st.table(res_series)
 
-            # ─── MEMORIAL FISCAL ───
+            # Cálculo Fiscal
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
 
             def obter_aliq(row, rb):
@@ -209,25 +209,25 @@ def main():
                 ae = ((rb * an) - de) / rb if rb > 0 else an
                 return ae * (Decimal("1.0") - pi) if row['ST'] else ae
 
-            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil': 'sum', 'Valor_ST': 'sum', 'Base_DAS_Item': 'sum'}).reset_index()
+            resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Valor_Contabil_Item': 'sum', 'Valor_ST_Item': 'sum', 'Valor_IPI_Item': 'sum', 'Base_DAS_Item': 'sum'}).reset_index()
             resumo['Base_Líquida'] = resumo.apply(lambda x: (x['Base_DAS_Item'] * Decimal("-1") if x['Categoria'] == "DEVOLUÇÃO VENDA" else x['Base_DAS_Item']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
             resumo['Aliq_Final'] = resumo.apply(lambda x: obter_aliq(x, rbt12), axis=1)
-            resumo['DAS'] = resumo.apply(lambda row: (row['Base_Líquida'] * row['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
+            resumo['DAS'] = resumo.apply(lambda r: (r['Base_Líquida'] * r['Aliq_Final']).quantize(Decimal("0.01"), ROUND_HALF_UP), axis=1)
             resumo['Aliq_Perc'] = resumo['Aliq_Final'].apply(lambda x: f"{(x*100):.13f}%")
             
-            st.subheader("📑 Resumo Analítico por CFOP (Base = Contábil - ST)")
-            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil', 'Valor_ST', 'Base_Líquida', 'DAS']])
+            st.subheader("📑 Memorial Analítico (Contábil inclui IPI e ST)")
+            st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Perc', 'Valor_Contabil_Item', 'Valor_ST_Item', 'Valor_IPI_Item', 'Base_Líquida', 'DAS']])
 
             st.markdown("---")
             m1, m2, m3 = st.columns(3)
-            m1.metric("Faturamento Contábil", f"R$ {resumo['Valor_Contabil'].sum():,.2f}")
-            m2.metric("ST Abatido da Base", f"R$ {resumo['Valor_ST'].sum():,.2f}")
+            m1.metric("Contábil Auditado", f"R$ {resumo['Valor_Contabil_Item'].sum():,.2f}")
+            m2.metric("Base PGDAS Líquida", f"R$ {resumo['Base_Líquida'].sum():,.2f}")
             m3.metric("Total DAS", f"R$ {resumo['DAS'].sum():,.2f}")
             
-            st.subheader("📋 Auditoria de Cancelamentos e Rastreabilidade")
-            st.dataframe(df[['Nota', 'Origem', 'CFOP', 'Base_DAS_Item', 'Cancelada', 'Chave']], use_container_width=True)
+            st.subheader("📋 Auditoria Detalhada")
+            st.dataframe(df[['Nota', 'CFOP', 'Valor_Contabil_Item', 'Valor_IPI_Item', 'Valor_ST_Item', 'Base_DAS_Item', 'Cancelada']], use_container_width=True)
         else:
-            st.error("Nenhuma nota processada.")
+            st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__":
     main()
