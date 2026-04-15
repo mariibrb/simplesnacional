@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - ALTA PRECISÃO)
-Foco: PGDAS Anexos I e II, Faixas 1-6, Continuidade e Precisão Decimal Máxima
+Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - PADRÃO BRASIL)
+Foco: PGDAS Anexos I e II, Faixas 1-6, Formatação Monetária PT-BR e Precisão Máxima
 """
 
 import zipfile
@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
+import locale
 
 # Precisão de 60 casas para cálculos fiscais de alta fidelidade
 getcontext().prec = 60 
@@ -33,10 +34,27 @@ TABELA_ANEXO_II = [
     (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.30"), Decimal("720000.00"), Decimal("0.3200")),
 ]
 
-CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_DEVOLUCAO_VENDA = {"1201", "1202", "1411", "2201", "2202", "2411", "5201", "5202", "5411", "6201", "6202", "6411"}
 CFOPS_EXCLUSAO_DAS = {"5949", "6905", "6209", "6152", "5151", "5152", "6151", "6202", "6411", "5202", "5411"}
+CFOPS_INDUSTRIA = {"5101", "6101", "5103", "5105", "5401", "6401"}
 CFOPS_ST = {"5401", "5403", "5405", "5603", "6401", "6403", "6404", "1411", "2411", "5411", "6411"}
+
+# ─── FUNÇÕES DE FORMATAÇÃO PT-BR ─────────────────────────────────────────────
+
+def fmt_br(valor):
+    """Formata Decimal/Float para string monetária brasileira"""
+    try:
+        return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return "0,00"
+
+def fmt_aliq(valor):
+    """Formata alíquota com 15 casas e vírgula decimal"""
+    try:
+        val_perc = valor * 100
+        return f"{val_perc:.15f}".replace(".", ",") + "%"
+    except:
+        return "0,000000000000000%"
 
 # ─── ESTILIZAÇÃO RIHANNA / MONTSERRAT ────────────────────────────────────────
 st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
@@ -87,8 +105,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
         is_o_emissor_alvo = (emit_cnpj == cnpj_cliente)
         is_o_destinatario_alvo = (dest_cnpj == cnpj_cliente)
 
-        if not (is_o_emissor_alvo or is_o_destinatario_alvo):
-            return []
+        if not (is_o_emissor_alvo or is_o_destinatario_alvo): return []
             
         ide = inf.find(f"{ns_nfe}ide")
         n_nota, serie, modelo = int(ide.find(f"{ns_nfe}nNF").text), ide.find(f"{ns_nfe}serie").text, ide.find(f"{ns_nfe}mod").text
@@ -101,17 +118,13 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
             v_outro = Decimal(prod.find(f"{ns_nfe}vOutro").text) if prod.find(f"{ns_nfe}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns_nfe}vFrete").text) if prod.find(f"{ns_nfe}vFrete") is not None else Decimal("0")
             
-            v_st, v_ipi = Decimal("0"), Decimal("0")
+            v_st = Decimal("0")
             icms_node = imposto.find(f".//{ns_nfe}ICMS")
             if icms_node is not None:
                 st_node = icms_node.find(f".//{ns_nfe}vICMSST")
                 if st_node is not None: v_st = Decimal(st_node.text)
-            ipi_node = imposto.find(f".//{ns_nfe}IPI")
-            if ipi_node is not None:
-                v_ipi_val = ipi_node.find(f".//{ns_nfe}vIPI")
-                if v_ipi_val is not None: v_ipi = Decimal(v_ipi_val.text)
-
-            v_contabil = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
+            
+            v_contabil = (v_p + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns_nfe}CFOP").text.replace(".", "")
             
@@ -130,7 +143,7 @@ def extrair_dados_xml(conteudo, chaves_vistas, cnpj_cliente):
                 "CFOP": cfop, "ST": cfop in CFOPS_ST, 
                 "Emitente": emit_cnpj, "Destinatario": dest_cnpj,
                 "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "V_Contabil": v_contabil, "V_ST": v_st, "V_IPI": v_ipi,
+                "V_Contabil": v_contabil, "V_ST": v_st,
                 "Base_DAS": base_das, "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
                 "Categoria": categoria, "Chave": chave
             })
@@ -159,7 +172,7 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Integral")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria BR Standard")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -196,14 +209,13 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
-            
-            df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'V_IPI', 'Base_DAS']] = Decimal("0")
+            df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'Base_DAS']] = Decimal("0")
 
-            st.subheader("📊 Resumo de Numeração e Continuidade")
+            st.subheader("📊 Resumo de Continuidade")
             res_series = df.groupby(['Unidade_CNPJ', 'Tipo', 'Modelo', 'Série']).agg(
                 Nota_Inicial=('Nota', 'min'),
                 Nota_Final=('Nota', 'max'),
-                Qtd_Processada=('Nota', 'nunique')
+                Qtd=('Nota', 'nunique')
             ).reset_index()
             st.table(res_series)
 
@@ -225,23 +237,29 @@ def main():
                 res_fisc = df_f.apply(lambda r: calcular_aliq_efetiva(r, rbt12), axis=1, result_type='expand')
                 df_f['Base_F'], df_f['Aliq_F'], df_f['DAS'] = res_fisc[0], res_fisc[1], res_fisc[2]
 
-                st.subheader("📑 Memorial Analítico (Alta Precisão Decimal)")
+                st.subheader("📑 Memorial Analítico")
                 resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'V_Contabil': 'sum', 'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
                 resumo['Aliq_Ef (%)'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
                 
-                # AUMENTO DE CASAS DECIMAIS PARA 15 CASAS NA EXIBIÇÃO
-                resumo['Aliq_Ef (%)'] = resumo['Aliq_Ef (%)'].apply(lambda x: f"{(x*100):.15f}%")
+                # APLICAÇÃO DA FORMATAÇÃO BRASILEIRA
+                resumo['Aliq_Ef (%)'] = resumo['Aliq_Ef (%)'].apply(fmt_aliq)
+                resumo['V_Contabil'] = resumo['V_Contabil'].apply(fmt_br)
+                resumo['Base_F'] = resumo['Base_F'].apply(fmt_br)
+                resumo['DAS'] = resumo['DAS'].apply(fmt_br)
                 
                 st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq_Ef (%)', 'V_Contabil', 'Base_F', 'DAS']])
 
                 st.markdown("---")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Bruto Tributável", f"R$ {df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum():,.2f}")
-                m2.metric("(-) Devoluções Válidas", f"R$ {abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()):,.2f}")
-                m3.metric("DAS Final", f"R$ {df_f['DAS'].sum():,.2f}")
+                m1.metric("Bruto Tributável", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum())}")
+                m2.metric("(-) Devoluções", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
+                m3.metric("DAS Final", f"R$ {fmt_br(df_f['DAS'].sum())}")
             
             st.subheader("📋 Auditoria Detalhada")
-            st.dataframe(df[['Nota', 'CFOP', 'Emitente', 'Destinatario', 'Categoria', 'Tipo', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota encontrada com o CNPJ informado.")
+            df_view = df.copy()
+            df_view['V_Contabil'] = df_view['V_Contabil'].apply(fmt_br)
+            df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
+            st.dataframe(df_view[['Nota', 'CFOP', 'Emitente', 'Destinatario', 'Categoria', 'Tipo', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
+        else: st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__": main()
