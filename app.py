@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria de Elite (VERSÃO AUDITORIA FILTRADA)
-Foco: Auditoria Detalhada Única (Somente Notas Válidas), Continuidade 55/65, Locação e PGDAS
+Sentinela Ecosystem - Auditoria de Elite (VERSÃO MULTI-ITEM CORRIGIDA)
+Foco: Leitura de todos os itens do Cupom/Nota, PGDAS I/III, Continuidade e Cor Rosa
 """
 
 import zipfile
@@ -14,7 +14,7 @@ import pandas as pd
 # Precisão absoluta de 60 casas para bater com o PGDAS
 getcontext().prec = 60 
 
-# ─── BANCO DE DIRETRIZES FISCAIS (BASE DE DATA) ────────────────────────────
+# ─── BANCO DE DIRETRIZES FISCAIS ───────────────────────────────────────────
 DIRETRIZES_FISCAIS = {
     "08399950000142": {
         "nome": "LOGUS COMERCIO DE FERRAMENTAS",
@@ -23,7 +23,7 @@ DIRETRIZES_FISCAIS = {
     }
 }
 
-# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS PGDAS) ───────────────────────────
+# ─── TABELAS DE PARTILHA ──────────────────────────────────────────────────
 PARTILHA_ANEXO_I = {
     1: {'icms': Decimal("0.34")}, 2: {'icms': Decimal("0.34")},
     3: {'icms': Decimal("0.335")}, 4: {'icms': Decimal("0.335")},
@@ -49,7 +49,7 @@ def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X
 def fmt_aliq(v): return f"{(v * 100):,.4f}".replace(".", ",") + "%"
 def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
 
-# ─── PROCESSAMENTO XML POR ITEM ─────────────────────────────────────────────
+# ─── PROCESSAMENTO XML (AGORA VENDO TODOS OS ITENS) ─────────────────────────
 
 def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
     regs = []
@@ -68,6 +68,7 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
         n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
         especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
 
+        # Percorre TODOS os itens (det) da nota fiscal/cupom
         for det in inf.findall(f"{ns}det"):
             prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
@@ -75,13 +76,17 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
             if icms_node is not None:
-                csosn = icms_node.find(f".//{ns}CSOSN")
-                if csosn is not None and csosn.text in ["201", "202", "203", "500"]: possui_st = True
+                # Verifica CSOSN de cada item individualmente
+                csosn_node = icms_node.find(f".//{ns}CSOSN")
+                if csosn_node is not None and csosn_node.text in ["201", "202", "203", "500"]:
+                    possui_st = True
 
             v_p = Decimal(prod.find(f"{ns}vProd").text)
             v_d = Decimal(prod.find(f"{ns}vDesc").text) if prod.find(f"{ns}vDesc") is not None else Decimal("0")
             v_o = Decimal(prod.find(f"{ns}vOutro").text) if prod.find(f"{ns}vOutro") is not None else Decimal("0")
             v_f = Decimal(prod.find(f"{ns}vFrete").text) if prod.find(f"{ns}vFrete") is not None else Decimal("0")
+            
+            # Cálculo da base por item
             base_item = (v_p - v_d + v_o + v_f).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
             categoria = "OUTROS"
@@ -179,7 +184,7 @@ def main():
         loc_iii = st.checkbox("Anexo III: Locação?", value=config["anexo_iii"]["locacao"])
         
         st.subheader("💰 Input de Locação")
-        val_loc_raw = st.text_input("Faturamento Manual Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
+        val_loc_raw = st.text_input("Faturamento Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
         v_loc_manual = Decimal(val_loc_raw.replace(".", "").replace(",", "."))
         
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
@@ -189,7 +194,7 @@ def main():
     with c2: f_canc = st.file_uploader("Canceladas ZIP/XML", accept_multiple_files=True)
 
     if st.button("🚀 Iniciar Processamento") and f_norm:
-        if not cnpj_alvo or rbt12 == 0: st.error("Dados incompletos."); return
+        if not cnpj_alvo or rbt12 == 0: st.error("Faltam dados essenciais."); return
         
         # Mapeamento de Canceladas
         canc = set()
@@ -199,17 +204,19 @@ def main():
                 if isinstance(item, set): canc.update(item)
                 else: canc.add(item)
         
-        regs = []
-        for f in f_norm: regs.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo, radical_grupo=rad))
+        regs_raw = []
+        for f in f_norm: regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo, radical_grupo=rad))
         
-        if regs:
-            # Drop duplicidades e Cancelamento
-            df = pd.DataFrame(regs).drop_duplicates(subset=['Chave', 'Base_DAS', 'CFOP'])
+        if regs_raw:
+            # Agrupa os itens da mesma nota antes de processar duplicidades de arquivo
+            df = pd.DataFrame(regs_raw)
+            
+            # Marca canceladas antes de agrupar para não somar o que deve ser expurgado
             df['Cancelada'] = df['Chave'].isin(canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
 
-            # Resumo de Continuidade (Somente Emissão Própria do Modelo 55/65)
-            st.subheader("📊 Resumo de Continuidade (Emissão Própria)")
+            # ─── 📊 RESUMO DE CONTINUIDADE (EMISSÃO PRÓPRIA REAL) ───
+            st.subheader("📊 Resumo de Continuidade")
             df_propria = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada'])].copy()
             if not df_propria.empty:
                 res_cont = df_propria.groupby(['Espécie', 'Série']).agg(
@@ -219,9 +226,10 @@ def main():
                 ).reset_index()
                 st.table(res_cont)
 
-            # Filtrar apenas o que entra na apuração (Receita Bruta e Devolução Venda NÃO canceladas)
+            # Filtragem para Apuração
             df_f = df[(df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
             
+            # Adicionar Locação LBM
             if v_loc_manual > 0:
                 loc_row = pd.DataFrame([{
                     "Emitente": cnpj_alvo, "Nota": 0, "Espécie": "LBM", "Série": "LOC",
@@ -244,6 +252,7 @@ def main():
                 for esp in sorted(df_f['Espécie'].unique()):
                     with st.expander(f"📌 Espécie {esp}", expanded=True):
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
+                        # Agrupamento para o memorial mostrar o total por CFOP/ST corretamente
                         resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
                         resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_efetiva(r['Anexo'], r['ST'], rbt12, st_i, loc_iii), axis=1).apply(fmt_aliq)
                         resumo['Base PGDAS'] = resumo['Base_DAS'].apply(fmt_br); resumo['Imposto DAS'] = resumo['DAS_Valor'].apply(fmt_br)
@@ -255,19 +264,18 @@ def main():
                 st.table(res_an[['Anexo', 'Base Líquida', 'Total DAS']])
 
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Faturamento Líquido", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_DAS'].sum())}")
+                m1.metric("Bruto Auditado", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_DAS'].sum())}")
                 m2.metric("(-) Devoluções", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_DAS'].sum()))}")
-                m3.metric("Total DAS", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
+                m3.metric("Total DAS a Pagar", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
 
-                # ─── 📋 AUDITORIA DETALHADA (FILTRADA POR APURAÇÃO) ───
-                st.subheader("📋 Auditoria Detalhada (Apenas Notas Consideradas)")
-                # Agrupa por nota para garantir uma linha por documento, somando os itens
+                st.subheader("📋 Auditoria Detalhada (Uma Linha por Nota)")
+                # Aqui o segredo: Agrupa por nota e série para garantir que o cupom multi-item apareça como um só
                 df_detalhe = df_f.groupby(['Emitente', 'Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Categoria']).agg({'Base_DAS': 'sum'}).reset_index()
                 df_detalhe['Base_DAS'] = df_detalhe['Base_DAS'].apply(fmt_br)
                 st.dataframe(df_detalhe, use_container_width=True)
             else:
-                st.info("Nenhuma nota válida após os filtros de apuração.")
+                st.info("Nenhuma nota válida após os filtros.")
         else:
-            st.error("Nenhuma nota lida.")
+            st.error("Nenhuma nota lida nos arquivos.")
 
 if __name__ == "__main__": main()
