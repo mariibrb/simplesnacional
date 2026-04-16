@@ -1,6 +1,6 @@
 """
-Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - DETALHAMENTO POR ANEXO)
-Foco: PGDAS Matriz/Filiais, Alíquota sobre RBT12, Estilo Rihanna e Memorial por Nota
+Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - TOTAIS POR ANEXO)
+Foco: PGDAS Matriz/Filiais, Alíquota sobre RBT12, Resumo por Anexo e Detalhamento
 """
 
 import zipfile
@@ -254,8 +254,14 @@ def main():
                 res_display['Imposto DAS'] = res_display['DAS'].apply(fmt_br)
                 st.table(res_display[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
 
-                # ─── NOVO: DETALHAMENTO DE NOTAS POR ANEXO ───
-                st.subheader("🔍 Quais notas compõem cada grupo?")
+                # ─── NOVO: TOTAIS CONSOLIDADOS POR ANEXO ───
+                st.subheader("🧱 Resumo Consolidado por Anexo")
+                resumo_anexo = df_f.groupby(['Anexo']).agg({'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
+                resumo_anexo['Base Líquida'] = resumo_anexo['Base_F'].apply(fmt_br)
+                resumo_anexo['DAS Total'] = resumo_anexo['DAS'].apply(fmt_br)
+                st.table(resumo_anexo[['Anexo', 'Base Líquida', 'DAS Total']])
+
+                st.subheader("🔍 Detalhamento de Notas")
                 for name, group in df_f.groupby(['Anexo', 'Categoria']):
                     with st.expander(f"Ver notas do {name[0]} - {name[1]}"):
                         notas_anexo = group[group['Base_DAS'] != 0].copy()
