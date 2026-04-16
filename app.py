@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria Integral Rihanna Mode (VERSÃO TOTAL 300+ LINHAS)
-Foco: PGDAS Anexos I, II e III, Partilha Detalhada, Matriz/Filiais e Matriosca ZIP
+Sentinela Ecosystem - Auditoria Integral Rihanna Mode (VERSÃO TRAVA DE EMISSOR)
+Foco: PGDAS Anexos I, II e III, Emissão Própria p/ Receita, Partilha e Matriosca
 """
 
 import zipfile
@@ -11,11 +11,10 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão interna de alta fidelidade para cálculos de 13 casas decimais
+# Precisão interna de alta fidelidade
 getcontext().prec = 60 
 
-# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS DO COMITÊ GESTOR) ────────────────
-# Definição exata da fatia de cada imposto para bater com o extrato PGDAS
+# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS) ─────────────────────────────────
 PARTILHA_ANEXO_I = {
     1: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
     2: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
@@ -43,12 +42,11 @@ PARTILHA_ANEXO_III = {
     6: {'irpj': Decimal("0.35"), 'csll': Decimal("0.12"), 'cofins': Decimal("0.1282"), 'pis': Decimal("0.0278"), 'cpp': Decimal("0.374"), 'iss': Decimal("0.00")},
 }
 
-# Tabelas de Faixas (ID, Limite_Inf, Limite_Sup, Aliq_Nominal, Valor_Deducao)
+# Tabelas de Faixas
 TABELA_ANEXO_I = [(1, 0, 180000, 0.04, 0), (2, 180000.01, 360000, 0.073, 5940), (3, 360000.01, 720000, 0.095, 13860), (4, 720000.01, 1800000, 0.107, 22500), (5, 1800000.01, 3600000, 0.143, 87300), (6, 3600000.01, 4800000, 0.19, 378000)]
 TABELA_ANEXO_II = [(1, 0, 180000, 0.045, 0), (2, 180000.01, 360000, 0.078, 5940), (3, 360000.01, 720000, 0.10, 13860), (4, 720000.01, 1800000, 0.112, 22500), (5, 1800000.01, 3600000, 0.147, 85500), (6, 3600000.01, 4800000, 0.30, 720000)]
 TABELA_ANEXO_III = [(1, 0, 180000, 0.06, 0), (2, 180000.01, 360000, 0.112, 9360), (3, 360000.01, 720000, 0.135, 17640), (4, 720000.01, 1800000, 0.16, 35640), (5, 1800000.01, 3600000, 0.21, 125640), (6, 3600000.01, 4800000, 0.33, 648000)]
 
-# CFOPS Estratégicos
 CFOPS_INDUSTRIA = {"5101", "6101", "5401", "6401", "5103", "5104"}
 CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
 CFOPS_VENDA_GERAL = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "6101", "6102", "6103", "6105", "6106", "6107", "6108", "5401", "5403", "5405", "6401", "6403", "6404"}
@@ -57,18 +55,13 @@ CFOPS_DEVOL_TERCEIRO = {"5201", "5202", "5411", "6201", "6202", "6411"}
 
 # ─── FUNÇÕES DE FORMATAÇÃO PT-BR ─────────────────────────────────────────────
 
-def fmt_br(v): 
-    return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def fmt_aliq(v): return f"{(v * 100):,.13f}".replace(".", ",") + "%"
+def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
 
-def fmt_aliq(v): 
-    return f"{(v * 100):,.13f}".replace(".", ",") + "%"
+# ─── PROCESSAMENTO XML POR ITEM ─────────────────────────────────────────────
 
-def limpar_cnpj(c): 
-    return re.sub(r'\D', '', str(c))
-
-# ─── PROCESSAMENTO XML POR ITEM (DETALHAMENTO MÁXIMO) ────────────────────────
-
-def extrair_dados_detalhados(conteudo, radical_cnpj):
+def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
     regs = []
     try:
         root = ET.fromstring(conteudo.lstrip())
@@ -81,10 +74,6 @@ def extrair_dados_detalhados(conteudo, radical_cnpj):
         dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
-        # Bloqueio de notas que não pertencem ao grupo econômico (radical)
-        if not (emit_cnpj.startswith(radical_cnpj) or dest_cnpj.startswith(radical_cnpj)): 
-            return []
-            
         ide = inf.find(f"{ns}ide")
         n_nota, serie, modelo, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
 
@@ -92,15 +81,12 @@ def extrair_dados_detalhados(conteudo, radical_cnpj):
             prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
             
-            # Detecção de ST por Item (DNA PGDAS)
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
             if icms_node is not None:
                 csosn_node = icms_node.find(f".//{ns}CSOSN")
-                if csosn_node is not None and csosn_node.text in ["201", "202", "203", "500"]: 
-                    possui_st = True
+                if csosn_node is not None and csosn_node.text in ["201", "202", "203", "500"]: possui_st = True
 
-            # Captura de todos os componentes de valor para auditoria contábil
             v_p = Decimal(prod.find(f"{ns}vProd").text)
             v_d = Decimal(prod.find(f"{ns}vDesc").text) if prod.find(f"{ns}vDesc") is not None else Decimal("0")
             v_o = Decimal(prod.find(f"{ns}vOutro").text) if prod.find(f"{ns}vOutro") is not None else Decimal("0")
@@ -112,30 +98,32 @@ def extrair_dados_detalhados(conteudo, radical_cnpj):
                 v_ipi_tag = ipi_node.find(f".//{ns}vIPI")
                 if v_ipi_tag is not None: v_ipi = Decimal(v_ipi_tag.text)
 
-            # Valor contábil vs Base DAS
             v_contabil = (v_p + v_ipi + v_o + v_f - v_d).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_item = (v_p - v_d + v_o + v_f).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
             categoria = "OUTROS"
-            if emit_cnpj.startswith(radical_cnpj):
-                if tp_nf == "1":
-                    if cfop in CFOPS_VENDA_GERAL or cfop in CFOPS_SERVICO: categoria = "RECEITA BRUTA"
-                elif cfop in CFOPS_DEVOL_PROPRIA: categoria = "DEVOLUÇÃO VENDA"
-            elif tp_nf == "1" and dest_cnpj.startswith(radical_cnpj) and cfop in CFOPS_DEVOL_TERCEIRO:
+            
+            # REGRA RIGOROSA: Receita Bruta SOMENTE se for emissão própria do CNPJ digitado
+            if emit_cnpj == cnpj_alvo and tp_nf == "1":
+                if cfop in CFOPS_VENDA_GERAL or cfop in CFOPS_SERVICO:
+                    categoria = "RECEITA BRUTA"
+            
+            # DEVOLUÇÕES: Podem vir do radical do grupo (emissão própria de entrada) ou do cliente (saída contra o grupo)
+            elif emit_cnpj.startswith(radical_grupo) and tp_nf == "0" and cfop in CFOPS_DEVOL_PROPRIA:
+                categoria = "DEVOLUÇÃO VENDA"
+            elif dest_cnpj.startswith(radical_grupo) and tp_nf == "1" and cfop in CFOPS_DEVOL_TERCEIRO:
                 categoria = "DEVOLUÇÃO VENDA"
 
-            # Definição de Anexo por CFOP
             if cfop in CFOPS_SERVICO: anexo = "ANEXO III"
             elif cfop in CFOPS_INDUSTRIA: anexo = "ANEXO II"
             else: anexo = "ANEXO I"
 
             regs.append({
-                "Unidade_CNPJ": emit_cnpj if emit_cnpj.startswith(radical_cnpj) else dest_cnpj,
+                "Unidade_CNPJ": emit_cnpj if emit_cnpj.startswith(radical_grupo) else dest_cnpj,
                 "Nota": n_nota, "Modelo": modelo, "Série": serie, "CFOP": cfop, "ST": possui_st, 
                 "Anexo": anexo, "V_Contabil": v_contabil, "Base_DAS": base_item, "Categoria": categoria, "Chave": chave
             })
-    except Exception as e:
-        pass
+    except: pass
     return regs
 
 def extrair_canceladas(conteudo):
@@ -158,8 +146,7 @@ def processar_recursivo(arquivo_bytes, func, **kwargs):
         with zipfile.ZipFile(io.BytesIO(arquivo_bytes)) as z:
             for n in z.namelist():
                 c = z.read(n)
-                if n.lower().endswith('.zip'):
-                    results.extend(processar_recursivo(c, func, **kwargs))
+                if n.lower().endswith('.zip'): results.extend(processar_recursivo(c, func, **kwargs))
                 elif n.lower().endswith('.xml'):
                     res = func(c, **kwargs)
                     if isinstance(res, list): results.extend(res)
@@ -188,13 +175,14 @@ def main():
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Matriosca")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria de Emissão Própria")
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
         st.header("👤 Perfil do Grupo")
-        cnpj_input = st.text_input("Radical CNPJ (8 dígitos)", key=f"c_{st.session_state.reset_key}")
-        radical = limpar_cnpj(cnpj_input)[:8] if cnpj_input else ""
+        cnpj_input = st.text_input("CNPJ Auditado (Unidade)", key=f"c_{st.session_state.reset_key}")
+        cnpj_alvo = limpar_cnpj(cnpj_input)
+        radical = cnpj_alvo[:8] if cnpj_alvo else ""
         st.header("⚙️ Parâmetros PGDAS")
         rbt12_raw = st.text_input("RBT12 Total Acumulado", key=f"r_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
@@ -205,7 +193,7 @@ def main():
     with c2: f_canc = st.file_uploader("Canceladas XML/ZIP", accept_multiple_files=True, type=["xml", "zip"], key=f"u2_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and f_norm:
-        if not radical or rbt12 == 0: st.error("Dados insuficientes."); return
+        if not cnpj_alvo or rbt12 == 0: st.error("CNPJ ou RBT12 ausentes."); return
         
         canc = set()
         for f in f_canc:
@@ -214,11 +202,12 @@ def main():
                 if isinstance(item, set): canc.update(item)
                 else: canc.add(item)
         
-        regs = []
-        for f in f_norm: regs.extend(processar_recursivo(f.read(), extrair_dados_detalhados, radical_cnpj=radical))
+        regs_raw = []
+        for f in f_norm: regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo, radical_grupo=radical))
         
-        if regs:
-            df = pd.DataFrame(regs)
+        if regs_raw:
+            df = pd.DataFrame(regs_raw)
+            df = df.drop_duplicates(subset=['Chave', 'Base_DAS', 'CFOP'], keep='first')
             df['Cancelada'] = df['Chave'].isin(canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
 
@@ -226,12 +215,10 @@ def main():
                 if anexo == "ANEXO I": tab, p_map = TABELA_ANEXO_I, PARTILHA_ANEXO_I
                 elif anexo == "ANEXO II": tab, p_map = TABELA_ANEXO_II, PARTILHA_ANEXO_II
                 else: tab, p_map = TABELA_ANEXO_III, PARTILHA_ANEXO_III
-                
                 faixa = tab[0]; f_idx = 1
                 for f in tab:
                     if rb_total <= f[2]: faixa = f; f_idx = f[0]; break
                     faixa = f; f_idx = f[0]
-                
                 ae = ((rb_total * Decimal(str(faixa[3]))) - Decimal(str(faixa[4]))) / rb_total
                 if st_item:
                     p = p_map[f_idx]
@@ -267,20 +254,21 @@ def main():
 
                 st.subheader("🔍 Detalhamento por Notas")
                 for name, group in df_f.groupby(['Anexo', 'Categoria']):
-                    with st.expander(f"Ver notas do {name[0]} - {name[1]}"):
+                    with st.expander(f"Notas do {name[0]} - {name[1]}"):
                         gn = group[group['Base_F'] != 0].copy()
                         gn['Valor'] = gn['Base_F'].apply(fmt_br)
                         st.dataframe(gn[['Unidade_CNPJ', 'Nota', 'Modelo', 'Série', 'CFOP', 'ST', 'Valor']], use_container_width=True)
 
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Bruto Grupo", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum())}")
+                m1.metric("Bruto Auditado", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum())}")
                 m2.metric("(-) Devoluções", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
                 m3.metric("Total DAS", f"R$ {fmt_br(df_f['DAS'].sum())}")
 
-            st.subheader("📋 Auditoria de Operações")
-            df['V_Contabil'] = df['V_Contabil'].apply(fmt_br)
-            df['Base_DAS'] = df['Base_DAS'].apply(fmt_br)
-            st.dataframe(df[['Unidade_CNPJ', 'Nota', 'CFOP', 'ST', 'Anexo', 'Categoria', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota processável.")
+            st.subheader("📋 Auditoria de Itens")
+            df_view = df.copy()
+            df_view['V_Contabil'] = df_view['V_Contabil'].apply(fmt_br)
+            df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
+            st.dataframe(df_view[['Unidade_CNPJ', 'Nota', 'CFOP', 'ST', 'Anexo', 'Categoria', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
+        else: st.error("Nenhuma nota válida.")
 
 if __name__ == "__main__": main()
