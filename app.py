@@ -1,6 +1,6 @@
 """
-Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - CORREÇÃO DE ALÍQUOTA PGDAS)
-Foco: PGDAS Matriz/Filiais, Cálculo de Alíquota Efetiva sobre RBT12 e Estilo Rihanna
+Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - FIX RESET ANEXOS)
+Foco: PGDAS Matriz/Filiais, Alíquota sobre RBT12, Estilo Rihanna e Reset Total
 """
 
 import zipfile
@@ -15,7 +15,6 @@ import pandas as pd
 getcontext().prec = 60 
 
 # ─── REGRAS FISCAIS UNIVERSAIS (TABELAS OFICIAIS) ───────────────────────────
-# Estrutura: (Faixa, Limite_Inf, Limite_Sup, Aliq_Nominal, Valor_Deduzir, Perc_ICMS)
 TABELA_ANEXO_I = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.34")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.34")),
@@ -25,7 +24,6 @@ TABELA_ANEXO_I = [
     (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.19"), Decimal("378000.00"), Decimal("0.335")),
 ]
 
-# Estrutura: (Faixa, Limite_Inf, Limite_Sup, Aliq_Nominal, Valor_Deduzir, Perc_IPI_ICMS)
 TABELA_ANEXO_II = [
     (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.045"), Decimal("0.00"), Decimal("0.32")),
     (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.078"), Decimal("5940.00"), Decimal("0.32")),
@@ -179,61 +177,58 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 def main():
     st.title("🛡️ Sentinela Ecosystem - Auditoria Matriz e Filiais")
     
-    if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
+    # Gerenciador de Estado de Reset (Protocolo de Chave Dinâmica)
+    if 'reset_key' not in st.session_state:
+        st.session_state.reset_key = 0
 
     with st.sidebar:
         st.header("👤 Grupo Econômico")
-        cnpj_input = st.text_input("CNPJ (Matriz ou Filial)", key=f"c_{st.session_state.reset_key}")
+        cnpj_input = st.text_input("CNPJ (Matriz ou Filial)", key=f"cnpj_in_{st.session_state.reset_key}")
         radical = limpar_cnpj(cnpj_input)[:8] if cnpj_input else ""
         
         st.header("⚙️ Parâmetros Consolidados")
-        rbt12_raw = st.text_input("RBT12 Total do Grupo", value="", key=f"r_{st.session_state.reset_key}")
+        rbt12_raw = st.text_input("RBT12 Total do Grupo", value="", key=f"rbt12_in_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
+        # O Botão de Reset agora incrementa a chave, forçando a limpeza física dos uploaders
         if st.button("🗑️ Resetar Tudo"):
             st.session_state.reset_key += 1
             st.rerun()
 
     c1, c2 = st.columns(2)
-    with c1: f_norm = st.file_uploader("Movimentação Grupo", accept_multiple_files=True, type=["xml", "zip"])
-    with c2: f_canc = st.file_uploader("Canceladas Grupo", accept_multiple_files=True, type=["xml", "zip"])
+    # Uploaders vinculados à reset_key para limpeza efetiva
+    with c1: 
+        f_norm = st.file_uploader("Movimentação Grupo", accept_multiple_files=True, type=["xml", "zip"], key=f"uploader_norm_{st.session_state.reset_key}")
+    with c2: 
+        f_canc = st.file_uploader("Canceladas Grupo", accept_multiple_files=True, type=["xml", "zip"], key=f"uploader_canc_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not radical or rbt12 == 0:
             st.error("Informe o CNPJ e o RBT12 Acumulado."); return
 
         ch_canc = set()
-        for f in f_canc: ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
+        for f in f_canc: 
+            ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
 
         ch_vistas, regs = set(), []
-        for f in f_norm: regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, radical_cnpj=radical))
+        for f in f_norm: 
+            regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, radical_cnpj=radical))
         
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['Base_DAS']] = Decimal("0")
 
-            # ─── MOTOR DE CÁLCULO CONSOLIDADO (PGDAS STYLE) ───
-            
             def obter_aliq_efetiva(anexo, st_val, rb_total):
                 tab = TABELA_ANEXO_I if anexo == "ANEXO I" else TABELA_ANEXO_II
                 faixa = tab[0]
                 for f in tab:
                     if rb_total <= f[2]: faixa = f; break
                     faixa = f
-                
                 _, _, _, aliq_nom, deducao, p_icms_ipi = faixa
-                # Fórmula Oficial: (RBT12 * AliqNominal - Dedução) / RBT12
                 ae = ((rb_total * aliq_nom) - deducao) / rb_total if rb_total > 0 else aliq_nom
-                
-                # Se for ST, abate o percentual de partilha do ICMS (ou ICMS+IPI na Indústria)
-                if st_val:
-                    af = ae * (Decimal("1.0") - p_icms_ipi)
-                else:
-                    af = ae
-                return af
+                return ae * (Decimal("1.0") - p_icms_ipi) if st_val else ae
 
-            # Pré-calcula alíquotas para o grupo
             aliqs_grupo = {
                 "ANEXO I_False": obter_aliq_efetiva("ANEXO I", False, rbt12),
                 "ANEXO I_True": obter_aliq_efetiva("ANEXO I", True, rbt12),
