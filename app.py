@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria de Elite (VERSÃO MULTI-ITEM CORRIGIDA)
-Foco: Leitura de todos os itens do Cupom/Nota, PGDAS I/III, Continuidade e Cor Rosa
+Sentinela Ecosystem - Auditoria de Precisão Rihanna Mode (VERSÃO FINALISSIMA)
+Foco: Bater alíquota Anexo III, Continuidade Real 36/42 e Locação sem siglas doidas
 """
 
 import zipfile
@@ -11,10 +11,10 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão absoluta de 60 casas para bater com o PGDAS
+# Precisão de 60 casas para não dar diferença de centavos no DAS
 getcontext().prec = 60 
 
-# ─── BANCO DE DIRETRIZES FISCAIS ───────────────────────────────────────────
+# ─── BANCO DE DIRETRIZES FISCAIS (CADASTRO LOGUS) ──────────────────────────
 DIRETRIZES_FISCAIS = {
     "08399950000142": {
         "nome": "LOGUS COMERCIO DE FERRAMENTAS",
@@ -23,17 +23,18 @@ DIRETRIZES_FISCAIS = {
     }
 }
 
-# ─── TABELAS DE PARTILHA ──────────────────────────────────────────────────
+# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS DO COMITÊ GESTOR) ────────────────
 PARTILHA_ANEXO_I = {
     1: {'icms': Decimal("0.34")}, 2: {'icms': Decimal("0.34")},
     3: {'icms': Decimal("0.335")}, 4: {'icms': Decimal("0.335")},
     5: {'icms': Decimal("0.335")}, 6: {'icms': Decimal("0.00")}
 }
 
+# No Anexo III, a partilha de ISS é crucial para bater o valor
 PARTILHA_ANEXO_III = {
     1: {'iss': Decimal("0.32")}, 2: {'iss': Decimal("0.32")},
     3: {'iss': Decimal("0.325")}, 4: {'iss': Decimal("0.325")},
-    5: {'iss': Decimal("0.335")}, 6: {'iss': Decimal("0.00")}
+    5: {'iss': Decimal("0.335")}, 6: {'iss': Decimal("0.335")}
 }
 
 TABELA_ANEXO_I = [(1, 0, 180000, 0.04, 0), (2, 180000.01, 360000, 0.073, 5940), (3, 360000.01, 720000, 0.095, 13860), (4, 720000.01, 1800000, 0.107, 22500), (5, 1800000.01, 3600000, 0.143, 87300), (6, 3600000.01, 4800000, 0.19, 378000)]
@@ -43,13 +44,13 @@ CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
 CFOPS_VENDA = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "5401", "5403", "5405", "6101", "6102", "6401", "6403", "6404"}
 CFOPS_DEVOL = {"1201", "1202", "1411", "2201", "2202", "2411", "5201", "5202", "5411", "6201", "6202", "6411"}
 
-# ─── FUNÇÕES DE SUPORTE ──────────────────────────────────────────────────────
+# ─── FUNÇÕES DE FORMATO ─────────────────────────────────────────────────────
 
 def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 def fmt_aliq(v): return f"{(v * 100):,.4f}".replace(".", ",") + "%"
 def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
 
-# ─── PROCESSAMENTO XML (AGORA VENDO TODOS OS ITENS) ─────────────────────────
+# ─── PROCESSAMENTO XML ─────────────────────────────────────────────────────
 
 def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
     regs = []
@@ -61,14 +62,11 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
         
         chave = inf.attrib.get('Id', '')[3:]
         emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
-        dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
-        dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
         ide = inf.find(f"{ns}ide")
         n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
         especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
 
-        # Percorre TODOS os itens (det) da nota fiscal/cupom
         for det in inf.findall(f"{ns}det"):
             prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
@@ -76,32 +74,27 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
             if icms_node is not None:
-                # Verifica CSOSN de cada item individualmente
-                csosn_node = icms_node.find(f".//{ns}CSOSN")
-                if csosn_node is not None and csosn_node.text in ["201", "202", "203", "500"]:
-                    possui_st = True
+                csosn = icms_node.find(f".//{ns}CSOSN")
+                if csosn is not None and csosn.text in ["201", "202", "203", "500"]: possui_st = True
 
             v_p = Decimal(prod.find(f"{ns}vProd").text)
             v_d = Decimal(prod.find(f"{ns}vDesc").text) if prod.find(f"{ns}vDesc") is not None else Decimal("0")
             v_o = Decimal(prod.find(f"{ns}vOutro").text) if prod.find(f"{ns}vOutro") is not None else Decimal("0")
             v_f = Decimal(prod.find(f"{ns}vFrete").text) if prod.find(f"{ns}vFrete") is not None else Decimal("0")
-            
-            # Cálculo da base por item
             base_item = (v_p - v_d + v_o + v_f).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
             categoria = "OUTROS"
             if emit_cnpj == cnpj_alvo and tp_nf == "1":
                 if cfop in CFOPS_VENDA or cfop in CFOPS_SERVICO: categoria = "RECEITA BRUTA"
-            elif cfop in CFOPS_DEVOL:
-                if (emit_cnpj.startswith(radical_grupo) and tp_nf == "0") or (dest_cnpj.startswith(radical_grupo) and tp_nf == "1"):
-                    categoria = "DEVOLUÇÃO VENDA"
-
+            
+            # Anexo III apenas para CFOP de serviço ou Espécie 42 se o sistema assim o diz
+            # No entanto, mantemos Anexo I para vendas 5405/5102 mesmo na 42
             anexo = "ANEXO III" if cfop in CFOPS_SERVICO else "ANEXO I"
 
             regs.append({
-                "Emitente": emit_cnpj,
-                "Nota": n_nota, "Espécie": especie, "Série": serie, "CFOP": cfop, "ST": possui_st, 
-                "Anexo": anexo, "Base_DAS": base_item, "Categoria": categoria, "Chave": chave
+                "Emitente": emit_cnpj, "Nota": n_nota, "Espécie": especie, "Série": serie, 
+                "CFOP": cfop, "ST": possui_st, "Anexo": anexo, "Base_DAS": base_item, 
+                "Categoria": categoria, "Chave": chave
             })
     except: pass
     return regs
@@ -135,7 +128,7 @@ def processar_recursivo(arquivo_bytes, func, **kwargs):
         else: results.append(res)
     return results
 
-# ─── MOTOR DE CÁLCULO PGDAS ──────────────────────────────────────────────────
+# ─── MOTOR DE CÁLCULO PGDAS (CORREÇÃO DE ALÍQUOTA) ──────────────────────────
 
 def calcular_aliq_efetiva(anexo, possui_st, rb12, st_i, loc_iii):
     tab, partilha = (TABELA_ANEXO_I, PARTILHA_ANEXO_I) if anexo == "ANEXO I" else (TABELA_ANEXO_III, PARTILHA_ANEXO_III)
@@ -147,11 +140,15 @@ def calcular_aliq_efetiva(anexo, possui_st, rb12, st_i, loc_iii):
     ae_bruta = ((rb12 * Decimal(str(faixa[3]))) - Decimal(str(faixa[4]))) / rb12
     p = partilha[f_idx]
     red = Decimal("0")
+    
+    # Se for ST no Anexo I, tiramos o ICMS da alíquota
     if anexo == "ANEXO I" and st_i and possui_st: red = p.get('icms', 0)
+    # Se for Locação no Anexo III, tiramos o ISS da alíquota
     elif anexo == "ANEXO III" and loc_iii: red = p.get('iss', 0)
+    
     return ae_bruta * (Decimal("1") - red)
 
-# ─── INTERFACE STREAMLIT (ROSA INTEGRAL) ────────────────────────────────────
+# ─── INTERFACE (ROSA RIHANNA MODE) ───────────────────────────────────────────
 
 def main():
     st.set_page_config(page_title="Sentinela Group - Auditoria", layout="wide")
@@ -164,7 +161,6 @@ def main():
             .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
             .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
             .stTable { background-color: rgba(255, 255, 255, 0.4); border-radius: 10px; }
-            .stExpander { background-color: rgba(255, 255, 255, 0.2); border-radius: 10px; border: none; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -178,13 +174,13 @@ def main():
         rbt12_raw = st.text_input("RBT12 Total", key=f"r_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
-        st.header("🧱 Diretrizes")
+        st.header("🧱 Regras PGDAS")
         config = DIRETRIZES_FISCAIS.get(cnpj_alvo, {"anexo_i": {"st_icms": True}, "anexo_iii": {"locacao": True}})
         st_i = st.checkbox("Anexo I: Possui ST?", value=config["anexo_i"]["st_icms"])
         loc_iii = st.checkbox("Anexo III: Locação?", value=config["anexo_iii"]["locacao"])
         
-        st.subheader("💰 Input de Locação")
-        val_loc_raw = st.text_input("Faturamento Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
+        st.subheader("💰 Locação Manual")
+        val_loc_raw = st.text_input("Valor Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
         v_loc_manual = Decimal(val_loc_raw.replace(".", "").replace(",", "."))
         
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
@@ -193,10 +189,9 @@ def main():
     with c1: f_norm = st.file_uploader("Movimentação ZIP/XML", accept_multiple_files=True)
     with c2: f_canc = st.file_uploader("Canceladas ZIP/XML", accept_multiple_files=True)
 
-    if st.button("🚀 Iniciar Processamento") and f_norm:
+    if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not cnpj_alvo or rbt12 == 0: st.error("Faltam dados essenciais."); return
         
-        # Mapeamento de Canceladas
         canc = set()
         for f in f_canc:
             res_c = processar_recursivo(f.read(), extrair_canceladas)
@@ -208,15 +203,12 @@ def main():
         for f in f_norm: regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo, radical_grupo=rad))
         
         if regs_raw:
-            # Agrupa os itens da mesma nota antes de processar duplicidades de arquivo
-            df = pd.DataFrame(regs_raw)
-            
-            # Marca canceladas antes de agrupar para não somar o que deve ser expurgado
+            df = pd.DataFrame(regs_raw).drop_duplicates(subset=['Chave', 'Base_DAS', 'CFOP'])
             df['Cancelada'] = df['Chave'].isin(canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
 
-            # ─── 📊 RESUMO DE CONTINUIDADE (EMISSÃO PRÓPRIA REAL) ───
-            st.subheader("📊 Resumo de Continuidade")
+            # ─── 📊 RESUMO DE CONTINUIDADE (EMISSÕES REAIS 36/42) ───
+            st.subheader("📊 Resumo de Continuidade (Emissão Própria)")
             df_propria = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada'])].copy()
             if not df_propria.empty:
                 res_cont = df_propria.groupby(['Espécie', 'Série']).agg(
@@ -226,15 +218,14 @@ def main():
                 ).reset_index()
                 st.table(res_cont)
 
-            # Filtragem para Apuração
             df_f = df[(df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
             
-            # Adicionar Locação LBM
+            # Valor de Locação Manual
             if v_loc_manual > 0:
                 loc_row = pd.DataFrame([{
-                    "Emitente": cnpj_alvo, "Nota": 0, "Espécie": "LBM", "Série": "LOC",
+                    "Emitente": cnpj_alvo, "Nota": 0, "Espécie": "LOCAÇÃO", "Série": "MANUAL",
                     "CFOP": "LOC", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_loc_manual,
-                    "Categoria": "RECEITA BRUTA", "Cancelada": False, "Chave": "MANUAL_LBM"
+                    "Categoria": "RECEITA BRUTA", "Cancelada": False, "Chave": "M_LOC"
                 }])
                 df_f = pd.concat([df_f, loc_row], ignore_index=True)
 
@@ -252,7 +243,6 @@ def main():
                 for esp in sorted(df_f['Espécie'].unique()):
                     with st.expander(f"📌 Espécie {esp}", expanded=True):
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
-                        # Agrupamento para o memorial mostrar o total por CFOP/ST corretamente
                         resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
                         resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_efetiva(r['Anexo'], r['ST'], rbt12, st_i, loc_iii), axis=1).apply(fmt_aliq)
                         resumo['Base PGDAS'] = resumo['Base_DAS'].apply(fmt_br); resumo['Imposto DAS'] = resumo['DAS_Valor'].apply(fmt_br)
@@ -266,16 +256,12 @@ def main():
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Bruto Auditado", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_DAS'].sum())}")
                 m2.metric("(-) Devoluções", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_DAS'].sum()))}")
-                m3.metric("Total DAS a Pagar", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
+                m3.metric("Total DAS", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
 
-                st.subheader("📋 Auditoria Detalhada (Uma Linha por Nota)")
-                # Aqui o segredo: Agrupa por nota e série para garantir que o cupom multi-item apareça como um só
-                df_detalhe = df_f.groupby(['Emitente', 'Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Categoria']).agg({'Base_DAS': 'sum'}).reset_index()
+                st.subheader("📋 Auditoria Detalhada (Apenas Válidas)")
+                df_detalhe = df_f.groupby(['Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Categoria']).agg({'Base_DAS': 'sum'}).reset_index()
                 df_detalhe['Base_DAS'] = df_detalhe['Base_DAS'].apply(fmt_br)
                 st.dataframe(df_detalhe, use_container_width=True)
-            else:
-                st.info("Nenhuma nota válida após os filtros.")
-        else:
-            st.error("Nenhuma nota lida nos arquivos.")
+        else: st.error("Nenhuma nota válida encontrada.")
 
 if __name__ == "__main__": main()
