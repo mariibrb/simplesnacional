@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria Integral Rihanna Mode (VERSÃO TOTAL RESTAURADA)
-Foco: PGDAS Consolidado, Partilha IRPJ/CSLL/PIS/COFINS/CPP/IPI/ICMS, Precisão 13 Casas
+Sentinela Ecosystem - Auditoria Integral Rihanna Mode (VERSÃO TOTAL CORRIGIDA)
+Foco: PGDAS Consolidado, Partilha Tributária, Precisão 13 Casas e Reset de Anexos
 """
 
 import zipfile
@@ -90,7 +90,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ─── FUNÇÕES DE APOIO XML (RESTAURADO COMPLETO) ──────────────────────────────
+# ─── FUNÇÕES DE APOIO XML ───────────────────────────────────────────────────
 
 def extrair_chaves_cancelamento(conteudo):
     chaves = set()
@@ -136,7 +136,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, radical_cnpj):
             v_outro = Decimal(prod.find(f"{ns}vOutro").text) if prod.find(f"{ns}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns}vFrete").text) if prod.find(f"{ns}vFrete") is not None else Decimal("0")
             
-            # Captura de ST e IPI Restaurada
             v_st, v_ipi = Decimal("0"), Decimal("0")
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
@@ -153,7 +152,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, radical_cnpj):
                 v_ipi_val = ipi_node.find(f".//{ns}vIPI")
                 if v_ipi_val is not None: v_ipi = Decimal(v_ipi_val.text)
 
-            # Cálculos íntegros
             v_contabil = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
@@ -201,7 +199,7 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Matriz e Filiais")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Consolidada")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -260,8 +258,9 @@ def main():
                     base = (row['Base_DAS'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
                     return af, base, (base * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
+                # CORREÇÃO DA LINHA QUE CAUSOU O NAMEERROR
                 res = df_f.apply(aplicar_calculo, axis=1, result_type='expand')
-                df_f['Aliq_F'], df_f['Base_F'], df_f['DAS'] = res[0], res[1], res_f[2] = res[0], res[1], res[2]
+                df_f['Aliq_F'], df_f['Base_F'], df_f['DAS'] = res[0], res[1], res[2]
 
                 st.subheader("📑 Memorial Analítico Unificado")
                 resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
