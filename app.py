@@ -1,5 +1,5 @@
 """
-Auditoria de Precisão Rihanna Mode (VERSÃO ÍNTEGRA E CORRIGIDA)
+Auditoria Fiscal de Alta Precisão (VERSÃO ÍNTEGRA)
 Foco: Fidelidade Absoluta, Continuidade 55/65, Partilha Detalhada e Reset Funcional
 """
 
@@ -149,7 +149,7 @@ def calcular_aliq_efetiva_detalhada(anexo, possui_st, rb12, st_i):
 def main():
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
     
-    st.set_page_config(page_title="Auditoria de Precisão", layout="wide")
+    st.set_page_config(page_title="Sistema de Auditoria Fiscal", layout="wide")
     st.markdown(f"""
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
@@ -162,7 +162,7 @@ def main():
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("🛡️ Auditoria de Precisão - Rihanna Mode")
+    st.title("🛡️ Auditoria Fiscal de Alta Precisão")
 
     with st.sidebar:
         st.header("👤 Perfil da Empresa")
@@ -230,12 +230,12 @@ def main():
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
                         resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
                         resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_efetiva_detalhada(r['Anexo'], r['ST'], rbt12, st_i), axis=1).apply(fmt_aliq)
-                        resumo['Faturamento'] = resumo['Base_DAS'].apply(fmt_br); resumo['DAS'] = resumo['DAS_Valor'].apply(fmt_br)
-                        st.table(resumo[['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Faturamento', 'DAS']])
+                        resumo['Base PGDAS'] = resumo['Base_DAS'].apply(fmt_br); resumo['Imposto DAS'] = resumo['DAS_Valor'].apply(fmt_br)
+                        st.table(resumo[['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
 
                 m1, m2 = st.columns(2)
                 m1.metric("Faturamento Líquido", f"R$ {fmt_br(df_f['Base_DAS'].sum())}")
-                m2.metric("Total Simples", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
+                m2.metric("Total Simples Nacional", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
 
                 st.subheader("📋 Auditoria Detalhada")
                 df_det = df_f.copy(); df_det['Base_DAS'] = df_det['Base_DAS'].apply(fmt_br)
