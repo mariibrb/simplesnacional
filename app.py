@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria Universal Rihanna Mode (VERSÃO PARAMETRIZÁVEL)
-Foco: PGDAS Configurável (ST, Locação, Partilha Dinâmica), Matriz/Filiais e Matriosca
+Sentinela Ecosystem - Auditoria Universal com Inteligência de Dados (VERSÃO BD)
+Foco: PGDAS Parametrizado, Banco de Diretrizes por CNPJ, Espécies 36/42 e Matriosca
 """
 
 import zipfile
@@ -11,10 +11,22 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão interna de alta fidelidade
+# Precisão de 60 casas para garantir que a alíquota efetiva bata com 13 casas decimais
 getcontext().prec = 60 
 
-# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS DO COMITÊ GESTOR) ────────────────
+# ─── BANCO DE DADOS DE DIRETRIZES (CONFIGURAÇÃO POR EMPRESA) ────────────────
+# Este dicionário emula um banco de dados que define como cada CNPJ deve ser lido
+DIRETRIZES_FISCAIS = {
+    "08399950000142": {
+        "nome": "LOGUS COMERCIO DE FERRAMENTAS",
+        "anexo_i": {"st_icms": True},  # Seção II - Substituição Tributária
+        "anexo_iii": {"locacao": True}, # Seção III - Locação (Zera ISS)
+        "anexo_ii": {"st_icms": False}
+    },
+    # Você pode adicionar novos CNPJs aqui conforme sua base de clientes cresce
+}
+
+# ─── TABELAS DE PARTILHA E REGRAS FISCAIS ──────────────────────────────────
 PARTILHA_ANEXO_I = {
     1: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
     2: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
@@ -42,11 +54,12 @@ PARTILHA_ANEXO_III = {
     6: {'irpj': Decimal("0.35"), 'csll': Decimal("0.12"), 'cofins': Decimal("0.1282"), 'pis': Decimal("0.0278"), 'cpp': Decimal("0.374"), 'iss': Decimal("0.00")},
 }
 
-# Faixas de Alíquota Nominal e Dedução
+# Faixas PGDAS
 TABELA_ANEXO_I = [(1, 0, 180000, 0.04, 0), (2, 180000.01, 360000, 0.073, 5940), (3, 360000.01, 720000, 0.095, 13860), (4, 720000.01, 1800000, 0.107, 22500), (5, 1800000.01, 3600000, 0.143, 87300), (6, 3600000.01, 4800000, 0.19, 378000)]
 TABELA_ANEXO_II = [(1, 0, 180000, 0.045, 0), (2, 180000.01, 360000, 0.078, 5940), (3, 360000.01, 720000, 0.10, 13860), (4, 720000.01, 1800000, 0.112, 22500), (5, 1800000.01, 3600000, 0.147, 85500), (6, 3600000.01, 4800000, 0.30, 720000)]
 TABELA_ANEXO_III = [(1, 0, 180000, 0.06, 0), (2, 180000.01, 360000, 0.112, 9360), (3, 360000.01, 720000, 0.135, 17640), (4, 720000.01, 1800000, 0.16, 35640), (5, 1800000.01, 3600000, 0.21, 125640), (6, 3600000.01, 4800000, 0.33, 648000)]
 
+# CFOPS Estratégicos
 CFOPS_INDUSTRIA = {"5101", "6101", "5401", "6401", "5103", "5104"}
 CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
 CFOPS_VENDA_GERAL = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "6101", "6102", "6103", "6105", "6106", "6107", "6108", "5401", "5403", "5405", "6401", "6403", "6404"}
@@ -82,7 +95,7 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
             
-            # Detecção ST por CSOSN
+            # Detecção ST por CSOSN do Item
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
             if icms_node is not None:
@@ -94,6 +107,7 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             v_o = Decimal(prod.find(f"{ns}vOutro").text) if prod.find(f"{ns}vOutro") is not None else Decimal("0")
             v_f = Decimal(prod.find(f"{ns}vFrete").text) if prod.find(f"{ns}vFrete") is not None else Decimal("0")
             
+            v_contabil = (v_p + v_o + v_f - v_d).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_item = (v_p - v_d + v_o + v_f).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
             categoria = "OUTROS"
@@ -111,7 +125,7 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             regs.append({
                 "Unidade_CNPJ": emit_cnpj if emit_cnpj.startswith(radical_grupo) else dest_cnpj,
                 "Nota": n_nota, "Espécie": especie, "Série": serie, "CFOP": cfop, "ST": possui_st, 
-                "Anexo": anexo, "Base_DAS": base_item, "Categoria": categoria, "Chave": chave
+                "Anexo": anexo, "V_Contabil": v_contabil, "Base_DAS": base_item, "Categoria": categoria, "Chave": chave
             })
     except: pass
     return regs
@@ -169,29 +183,37 @@ def main():
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
-        st.header("👤 Perfil da Empresa")
-        cnpj_input = st.text_input("CNPJ Alvo (Emissão Própria)", key=f"c_{st.session_state.reset_key}")
+        st.header("👤 Identidade")
+        cnpj_input = st.text_input("CNPJ Auditado", key=f"c_{st.session_state.reset_key}")
         cnpj_alvo = limpar_cnpj(cnpj_input)
         radical = cnpj_alvo[:8] if cnpj_alvo else ""
         
-        st.header("⚙️ Parâmetros PGDAS")
+        st.header("⚙️ PGDAS")
         rbt12_raw = st.text_input("RBT12 Total", key=f"r_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
-        st.header("📋 Regras de Partilha")
-        st.write("Ajuste conforme o extrato:")
-        st_anexo_i = st.checkbox("Anexo I: Possui ST de ICMS?", value=True)
-        locacao_bens = st.checkbox("Anexo III: É Locação? (Zera ISS)", value=False)
-        st_anexo_ii = st.checkbox("Anexo II: Possui ST de ICMS?", value=True)
-        
+        # Inteligência de Banco de Dados: Se o CNPJ for conhecido, já pré-setamos as regras
+        st.header("🧱 Diretrizes Ativas")
+        if cnpj_alvo in DIRETRIZES_FISCAIS:
+            config = DIRETRIZES_FISCAIS[cnpj_alvo]
+            st.success(f"Empresa: {config['nome']}")
+            st_an_i = st.checkbox("Anexo I: Possui ST?", value=config['anexo_i']['st_icms'])
+            st_an_ii = st.checkbox("Anexo II: Possui ST?", value=config['anexo_ii']['st_icms'])
+            loc_an_iii = st.checkbox("Anexo III: Locação? (ISS 0)", value=config['anexo_iii']['locacao'])
+        else:
+            st.warning("CNPJ não cadastrado no BD.")
+            st_an_i = st.checkbox("Anexo I: Possui ST?", value=True)
+            st_an_ii = st.checkbox("Anexo II: Possui ST?", value=False)
+            loc_an_iii = st.checkbox("Anexo III: Locação?", value=False)
+
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
 
     c1, c2 = st.columns(2)
-    with c1: f_norm = st.file_uploader("Movimentação (XML/ZIP)", accept_multiple_files=True, key=f"u1_{st.session_state.reset_key}")
-    with c2: f_canc = st.file_uploader("Canceladas (XML/ZIP)", accept_multiple_files=True, key=f"u2_{st.session_state.reset_key}")
+    with c1: f_norm = st.file_uploader("Movimentação (ZIP/XML)", accept_multiple_files=True, key=f"u1_{st.session_state.reset_key}")
+    with c2: f_canc = st.file_uploader("Canceladas (ZIP/XML)", accept_multiple_files=True, key=f"u2_{st.session_state.reset_key}")
 
-    if st.button("🚀 Iniciar Auditoria") and f_norm:
-        if not cnpj_alvo or rbt12 == 0: st.error("Faltam dados essenciais."); return
+    if st.button("🚀 Iniciar Processamento") and f_norm:
+        if not cnpj_alvo or rbt12 == 0: st.error("Faltam dados."); return
         canc = set()
         for f in f_canc:
             res_c = processar_recursivo(f.read(), extrair_canceladas)
@@ -219,14 +241,11 @@ def main():
                     faixa = f; f_idx = f[0]
                 
                 ae = ((rb_total * Decimal(str(faixa[3]))) - Decimal(str(faixa[4]))) / rb_total
-                
-                # APLICAÇÃO DAS REGRAS DINÂMICAS DA SIDEBAR
                 p = p_map[f_idx]
                 deducao = Decimal("0")
-                if anexo == "ANEXO I" and st_anexo_i and st_item: deducao += p.get('icms', 0)
-                if anexo == "ANEXO II" and st_anexo_ii and st_item: deducao += p.get('icms', 0)
-                if anexo == "ANEXO III" and locacao_bens: deducao += p.get('iss', 0)
-                
+                if anexo == "ANEXO I" and st_an_i and st_item: deducao += p.get('icms', 0)
+                if anexo == "ANEXO II" and st_an_ii and st_item: deducao += p.get('icms', 0)
+                if anexo == "ANEXO III" and loc_an_iii: deducao += p.get('iss', 0)
                 return ae * (Decimal("1") - deducao)
 
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
@@ -241,7 +260,7 @@ def main():
                 res = df_f.apply(aplicar, axis=1, result_type='expand')
                 df_f['Aliq_F'], df_f['DAS'] = res[0], res[1]
 
-                st.subheader("📑 Memorial Analítico por Espécie")
+                st.subheader("📑 Memorial por Espécie (36 vs 42)")
                 for esp in sorted(df_f['Espécie'].unique()):
                     label = f"Espécie {esp} ({'NF-e' if esp=='36' else 'NFC-e' if esp=='42' else 'Outros'})"
                     with st.expander(f"📌 {label}", expanded=True):
@@ -260,14 +279,14 @@ def main():
                 st.table(res_an[['Anexo', 'Base Líquida', 'Total DAS']])
 
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Faturamento Líquido", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_DAS'].sum())}")
+                m1.metric("Bruto Grupo", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_DAS'].sum())}")
                 m2.metric("(-) Devoluções", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_DAS'].sum()))}")
-                m3.metric("Total DAS Grupo", f"R$ {fmt_br(df_f['DAS'].sum())}")
+                m3.metric("Total DAS", f"R$ {fmt_br(df_f['DAS'].sum())}")
 
             st.subheader("📋 Auditoria de Itens")
             df_view = df.copy()
             df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
             st.dataframe(df_view[['Unidade_CNPJ', 'Nota', 'Espécie', 'Série', 'CFOP', 'ST', 'Anexo', 'Categoria', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota processável encontrada.")
+        else: st.error("Nenhuma nota válida encontrada.")
 
 if __name__ == "__main__": main()
