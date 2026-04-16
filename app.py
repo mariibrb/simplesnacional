@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria Integral Rihanna Mode (VERSÃO ESPÉCIE 55/42)
-Foco: Diferenciação de Modelos, Partilha PGDAS, Matriz/Filiais e Rigor de Emissão
+Sentinela Ecosystem - Auditoria Integral Rihanna Mode (VERSÃO MODELO 55 vs 42)
+Foco: PGDAS Consolidado, Separação por Espécie, Partilha Tributária e Matriosca ZIP
 """
 
 import zipfile
@@ -14,7 +14,7 @@ import pandas as pd
 # Precisão interna de alta fidelidade
 getcontext().prec = 60 
 
-# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS) ─────────────────────────────────
+# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS DO COMITÊ GESTOR) ────────────────
 PARTILHA_ANEXO_I = {
     1: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
     2: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
@@ -52,7 +52,7 @@ CFOPS_VENDA_GERAL = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "61
 CFOPS_DEVOL_PROPRIA = {"1201", "1202", "1411", "2201", "2202", "2411"}
 CFOPS_DEVOL_TERCEIRO = {"5201", "5202", "5411", "6201", "6202", "6411"}
 
-# ─── FUNÇÕES DE FORMATAÇÃO ───────────────────────────────────────────────────
+# ─── FUNÇÕES DE FORMATAÇÃO PT-BR ─────────────────────────────────────────────
 
 def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 def fmt_aliq(v): return f"{(v * 100):,.13f}".replace(".", ",") + "%"
@@ -79,8 +79,6 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
         for det in inf.findall(f"{ns}det"):
             prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
-            
-            # Detecção ST por Espécie e Item
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
             if icms_node is not None:
@@ -102,17 +100,13 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             base_das = (v_p - v_d + v_o + v_f).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
             categoria = "OUTROS"
-            # TRAVA DE EMISSÃO PRÓPRIA PARA RECEITA BRUTA
             if emit_cnpj == cnpj_alvo and tp_nf == "1":
                 if cfop in CFOPS_VENDA_GERAL or cfop in CFOPS_SERVICO: categoria = "RECEITA BRUTA"
-            
-            # DEVOLUÇÕES (Entrada Própria ou Saída de Terceiro)
             elif emit_cnpj.startswith(radical_grupo) and tp_nf == "0" and cfop in CFOPS_DEVOL_PROPRIA:
                 categoria = "DEVOLUÇÃO VENDA"
             elif dest_cnpj.startswith(radical_grupo) and tp_nf == "1" and cfop in CFOPS_DEVOL_TERCEIRO:
                 categoria = "DEVOLUÇÃO VENDA"
 
-            # Hierarquia de Anexo
             if cfop in CFOPS_SERVICO or modelo == "42": anexo = "ANEXO III"
             elif cfop in CFOPS_INDUSTRIA: anexo = "ANEXO II"
             else: anexo = "ANEXO I"
@@ -137,7 +131,7 @@ def extrair_canceladas(conteudo):
     except: pass
     return ch_canc
 
-# ─── MOTOR MATRIOSCA ─────────────────────────────────────────────────────────
+# ─── MOTOR MATRIOSCA RECURSIVO ──────────────────────────────────────────────
 
 def processar_recursivo(arquivo_bytes, func, **kwargs):
     results = []
@@ -160,7 +154,7 @@ def processar_recursivo(arquivo_bytes, func, **kwargs):
 # ─── INTERFACE STREAMLIT ─────────────────────────────────────────────────────
 
 def main():
-    st.set_page_config(page_title="Sentinela Ecosystem - Auditoria 55/42", layout="wide")
+    st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
     st.markdown("""
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
@@ -170,10 +164,11 @@ def main():
             .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
             .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
             .stTable { background-color: rgba(255, 255, 255, 0.4); border-radius: 10px; }
+            .stExpander { background-color: rgba(255, 255, 255, 0.2); border-radius: 10px; border: none; }
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("🛡️ Sentinela Ecosystem - Auditoria por Espécie")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria de Espécies")
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
@@ -187,8 +182,8 @@ def main():
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
 
     c1, c2 = st.columns(2)
-    with c1: f_norm = st.file_uploader("Movimentação (Mod 55/42)", accept_multiple_files=True, type=["xml", "zip"], key=f"u1_{st.session_state.reset_key}")
-    with c2: f_canc = st.file_uploader("Canceladas", accept_multiple_files=True, type=["xml", "zip"], key=f"u2_{st.session_state.reset_key}")
+    with c1: f_norm = st.file_uploader("Movimentação XML/ZIP", accept_multiple_files=True, type=["xml", "zip"], key=f"u1_{st.session_state.reset_key}")
+    with c2: f_canc = st.file_uploader("Canceladas XML/ZIP", accept_multiple_files=True, type=["xml", "zip"], key=f"u2_{st.session_state.reset_key}")
 
     if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not cnpj_alvo or rbt12 == 0: st.error("Dados insuficientes."); return
@@ -208,7 +203,7 @@ def main():
             df['Cancelada'] = df['Chave'].isin(canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
 
-            def calc_ae_partilhada(anexo, st_item, rb_total):
+            def calc_ae(anexo, st_item, rb_total):
                 if anexo == "ANEXO I": tab, p_map = TABELA_ANEXO_I, PARTILHA_ANEXO_I
                 elif anexo == "ANEXO II": tab, p_map = TABELA_ANEXO_II, PARTILHA_ANEXO_II
                 else: tab, p_map = TABELA_ANEXO_III, PARTILHA_ANEXO_III
@@ -225,7 +220,7 @@ def main():
 
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             if not df_f.empty:
-                aliqs = { f"{a}_{s}": calc_ae_partilhada(a, s, rbt12) for a in ["ANEXO I", "ANEXO II", "ANEXO III"] for s in [True, False] }
+                aliqs = { f"{a}_{s}": calc_ae(a, s, rbt12) for a in ["ANEXO I", "ANEXO II", "ANEXO III"] for s in [True, False] }
                 def aplicar(row):
                     af = aliqs[f"{row['Anexo']}_{row['ST']}"]
                     mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
@@ -235,13 +230,17 @@ def main():
                 res = df_f.apply(aplicar, axis=1, result_type='expand')
                 df_f['Aliq_F'], df_f['DAS'] = res[0], res[1]
 
-                st.subheader("📑 Memorial Analítico Unificado")
-                resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Base_DAS': 'sum', 'DAS': 'sum'}).reset_index()
-                resumo['Aliq (%)'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
-                resumo['Aliq (%)'] = resumo['Aliq (%)'].apply(fmt_aliq)
-                resumo['Base PGDAS'] = resumo['Base_DAS'].apply(fmt_br)
-                resumo['Imposto DAS'] = resumo['DAS'].apply(fmt_br)
-                st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
+                st.subheader("📑 Memorial Analítico por Espécie")
+                # Separação visual por Modelo de Nota
+                for mod in sorted(df_f['Modelo'].unique()):
+                    with st.expander(f"📌 Modelo de Nota: {mod}", expanded=True):
+                        df_mod = df_f[df_f['Modelo'] == mod].copy()
+                        resumo = df_mod.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Base_DAS': 'sum', 'DAS': 'sum'}).reset_index()
+                        resumo['Aliq (%)'] = df_mod.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
+                        resumo['Aliq (%)'] = resumo['Aliq (%)'].apply(fmt_aliq)
+                        resumo['Base PGDAS'] = resumo['Base_DAS'].apply(fmt_br)
+                        resumo['Imposto DAS'] = resumo['DAS'].apply(fmt_br)
+                        st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
 
                 st.subheader("🧱 Consolidação por Anexo")
                 res_an = df_f.groupby('Anexo').agg({'Base_DAS': 'sum', 'DAS': 'sum'}).reset_index()
