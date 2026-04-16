@@ -1,5 +1,5 @@
 """
-Sentinela Ecosystem - Auditoria Universal Rihanna Mode (VERSÃO TOTAL E ÍNTEGRA)
+Auditoria de Precisão Rihanna Mode (VERSÃO ÍNTEGRA E CORRIGIDA)
 Foco: Fidelidade Absoluta, Continuidade 55/65, Partilha Detalhada e Reset Funcional
 """
 
@@ -14,7 +14,7 @@ import pandas as pd
 # Precisão absoluta para bater com as 13 casas decimais do PGDAS
 getcontext().prec = 60 
 
-# ─── TABELAS DE PARTILHA DETALHADA (PERCENTUAIS POR TRIBUTO - RESTAURADO) ──
+# ─── TABELAS DE PARTILHA DETALHADA (PERCENTUAIS POR TRIBUTO) ───────────────
 PARTILHA_ANEXO_I = {
     1: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
     2: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
@@ -109,7 +109,6 @@ def extrair_canceladas(conteudo):
     except: pass
     return ch_canc
 
-# RECURSIVIDADE PLENA (RESTAURADA)
 def processar_recursivo(arquivo_bytes, func, **kwargs):
     results = []
     try:
@@ -129,7 +128,7 @@ def processar_recursivo(arquivo_bytes, func, **kwargs):
         else: results.append(res)
     return results
 
-# ─── MOTOR DE CÁLCULO PGDAS (ALÍQUOTA NOMINAL E EFETIVA) ─────────────────────
+# ─── MOTOR DE CÁLCULO PGDAS ──────────────────────────────────────────────────
 
 def calcular_aliq_efetiva_detalhada(anexo, possui_st, rb12, st_i):
     tab, partilha_map = (TABELA_ANEXO_I, PARTILHA_ANEXO_I) if anexo == "ANEXO I" else (TABELA_ANEXO_III, PARTILHA_ANEXO_III)
@@ -138,7 +137,6 @@ def calcular_aliq_efetiva_detalhada(anexo, possui_st, rb12, st_i):
         if rb12 <= f[2]: faixa = f; f_idx = f[0]; break
         faixa = f; f_idx = f[0]
     
-    # AE = (RBT12 * AliqNominal - ParcDed) / RBT12
     ae_bruta = ((rb12 * Decimal(str(faixa[3]))) - Decimal(str(faixa[4]))) / rb12
     red = Decimal("0")
     if anexo == "ANEXO I" and st_i and possui_st: 
@@ -146,12 +144,12 @@ def calcular_aliq_efetiva_detalhada(anexo, possui_st, rb12, st_i):
     
     return ae_bruta * (Decimal("1") - red)
 
-# ─── INTERFACE STREAMLIT (RIHANNA MODE INTEGRAL) ────────────────────────────
+# ─── INTERFACE STREAMLIT ────────────────────────────────────────────────────
 
 def main():
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
     
-    st.set_page_config(page_title="Sentinela Auditoria", layout="wide")
+    st.set_page_config(page_title="Auditoria de Precisão", layout="wide")
     st.markdown(f"""
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
@@ -164,7 +162,7 @@ def main():
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Fiel")
+    st.title("🛡️ Auditoria de Precisão - Rihanna Mode")
 
     with st.sidebar:
         st.header("👤 Perfil da Empresa")
@@ -232,12 +230,12 @@ def main():
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
                         resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
                         resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_efetiva_detalhada(r['Anexo'], r['ST'], rbt12, st_i), axis=1).apply(fmt_aliq)
-                        resumo['Base PGDAS'] = resumo['Base_DAS'].apply(fmt_br); resumo['Imposto DAS'] = resumo['DAS_Valor'].apply(fmt_br)
-                        st.table(resumo[['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
+                        resumo['Faturamento'] = resumo['Base_DAS'].apply(fmt_br); resumo['DAS'] = resumo['DAS_Valor'].apply(fmt_br)
+                        st.table(resumo[['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Faturamento', 'DAS']])
 
                 m1, m2 = st.columns(2)
                 m1.metric("Faturamento Líquido", f"R$ {fmt_br(df_f['Base_DAS'].sum())}")
-                m2.metric("Total Simples Nacional", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
+                m2.metric("Total Simples", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
 
                 st.subheader("📋 Auditoria Detalhada")
                 df_det = df_f.copy(); df_det['Base_DAS'] = df_det['Base_DAS'].apply(fmt_br)
