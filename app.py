@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria e Memorial de Cálculo (VERSÃO INTEGRAL - MATRIZ E FILIAIS)
-Foco: PGDAS Grupo Econômico, Faixas 1-6, Blindagem por Radical de CNPJ e Estilo Rihanna
+Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - CORREÇÃO DE ALÍQUOTA)
+Foco: PGDAS Matriz/Filiais, Cálculo Único de Alíquota Efetiva por Grupo e Estilo Rihanna
 """
 
 import zipfile
@@ -104,7 +104,6 @@ def extrair_dados_xml(conteudo, chaves_vistas, radical_cnpj):
         dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
         dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
-        # LOGICA DE RADICAL (MATRIZ E FILIAIS)
         is_o_emissor_grupo = emit_cnpj.startswith(radical_cnpj)
         is_o_destinatario_grupo = dest_cnpj.startswith(radical_cnpj)
 
@@ -140,11 +139,11 @@ def extrair_dados_xml(conteudo, chaves_vistas, radical_cnpj):
                 if tp_nf == "1": # Saída do Grupo
                     if cfop in CFOPS_VENDA and cfop not in CFOPS_EXCLUSAO_SOMA:
                         categoria = "RECEITA BRUTA"
-                else: # Entrada Própria/Grupo (Devolução Própria)
+                else: # Entrada Grupo (Devolução Própria)
                     if cfop in CFOPS_DEVOL_VEN_PROPRIA:
                         categoria = "DEVOLUÇÃO VENDA"
-            else: # Emissão de Fora para o Grupo
-                if tp_nf == "1" and is_o_destinatario_grupo: # Saída de Terceiro para o Grupo (Devolução de Venda)
+            else: # Terceiro devolvendo para o Grupo
+                if tp_nf == "1" and is_o_destinatario_grupo:
                     if cfop in CFOPS_DEVOL_VEN_TERCEIRO:
                         categoria = "DEVOLUÇÃO VENDA"
 
@@ -181,17 +180,17 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Matriz/Filiais")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Consolidada")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
         st.header("👤 Grupo Econômico")
         cnpj_input = st.text_input("CNPJ (Matriz ou Filial)", key=f"c_{st.session_state.reset_key}")
-        radical_cnpj = limpar_cnpj(cnpj_input)[:8] # PEGA SÓ OS 8 PRIMEIROS
+        radical = limpar_cnpj(cnpj_input)[:8] if cnpj_input else ""
         
         st.header("⚙️ Parâmetros Consolidados")
-        rbt12_raw = st.text_input("RBT12 Total do Grupo", value="", key=f"r_{st.session_state.reset_key}")
+        rbt12_raw = st.text_input("RBT12 Unificado do Grupo", value="", key=f"r_{st.session_state.reset_key}")
         rbt12_clean = rbt12_raw.replace(".", "").replace(",", ".")
         rbt12 = Decimal(rbt12_clean) if rbt12_clean else Decimal("0")
         
@@ -204,48 +203,62 @@ def main():
     with c2: f_canc = st.file_uploader("Canceladas Grupo", accept_multiple_files=True, type=["xml", "zip"])
 
     if st.button("🚀 Iniciar Auditoria Grupo") and f_norm:
-        if not radical_cnpj:
-            st.error("Informe um CNPJ para identificar o radical do grupo."); return
+        if not radical:
+            st.error("Informe um CNPJ para identificar o grupo."); return
 
         ch_canc = set()
         for f in f_canc: ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
 
         ch_vistas, regs = set(), []
-        for f in f_norm: regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, radical_cnpj=radical_cnpj))
+        for f in f_norm: regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, radical_cnpj=radical))
         
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'Base_DAS']] = Decimal("0")
 
-            st.subheader("📊 Resumo de Continuidade por Unidade")
+            st.subheader("📊 Resumo de Continuidade (Somente Base Ativa)")
             df_cont = df[(df['Categoria'].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada'])].copy()
             if not df_cont.empty:
                 res_series = df_cont.groupby(['Unidade_CNPJ', 'Categoria', 'Modelo', 'Série']).agg(Nota_Ini=('Nota', 'min'), Nota_Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index()
                 st.table(res_series)
 
-            def calcular_aliq_efetiva(row, rb_total):
-                tab = TABELA_ANEXO_I if row['Anexo'] == "ANEXO I" else TABELA_ANEXO_II
+            # ─── MOTOR DE CÁLCULO CONSOLIDADO (ÚNICA APURAÇÃO POR ANEXO) ───
+            
+            def obter_aliq_efetiva_anexo(anexo, st_val, rb_total):
+                tab = TABELA_ANEXO_I if anexo == "ANEXO I" else TABELA_ANEXO_II
                 faixa = tab[0]
                 for f in tab:
                     if rb_total <= f[2]: faixa = f; break
                     faixa = f
                 _, _, _, a_nom, ded, p_ic = faixa
                 ae = ((rb_total * a_nom) - ded) / rb_total if rb_total > 0 else a_nom
-                af = ae * (Decimal("1.0") - p_ic) if row['ST'] else ae
-                mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
-                base_calc = (row['Base_DAS'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
-                return base_calc, af, (base_calc * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                af = ae * (Decimal("1.0") - p_ic) if st_val else ae
+                return af
+
+            # Pré-calcula alíquotas para os 4 cenários possíveis (Anexo I/II com e sem ST)
+            aliqs_grupo = {
+                "ANEXO I_False": obter_aliq_efetiva_anexo("ANEXO I", False, rbt12),
+                "ANEXO I_True": obter_aliq_efetiva_anexo("ANEXO I", True, rbt12),
+                "ANEXO II_False": obter_aliq_efetiva_anexo("ANEXO II", False, rbt12),
+                "ANEXO II_True": obter_aliq_efetiva_anexo("ANEXO II", True, rbt12),
+            }
 
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             if not df_f.empty:
-                res_fisc = df_f.apply(lambda r: calcular_aliq_efetiva(r, rbt12), axis=1, result_type='expand')
+                def aplicar_imposto(row):
+                    key = f"{row['Anexo']}_{row['ST']}"
+                    af = aliqs_grupo[key]
+                    mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
+                    base_calc = (row['Base_DAS'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                    return base_calc, af, (base_calc * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+                res_fisc = df_f.apply(aplicar_imposto, axis=1, result_type='expand')
                 df_f['Base_F'], df_f['Aliq_F'], df_f['DAS'] = res_fisc[0], res_fisc[1], res_fisc[2]
 
-                st.subheader("📑 Memorial Analítico do Grupo (13 Casas)")
+                st.subheader("📑 Memorial Analítico Unificado (Grupo Econômico)")
                 resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'V_Contabil': 'sum', 'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
                 resumo['Aliq_Ef'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
-                
                 resumo['Aliq (%)'] = resumo['Aliq_Ef'].apply(fmt_aliq)
                 resumo['Contabil'] = resumo['V_Contabil'].apply(fmt_br)
                 resumo['Base PGDAS'] = resumo['Base_F'].apply(fmt_br)
@@ -254,15 +267,15 @@ def main():
 
                 st.markdown("---")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Bruto Tributável Grupo", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum())}")
-                m2.metric("(-) Devoluções Válidas", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
-                m3.metric("DAS Total Grupo", f"R$ {fmt_br(df_f['DAS'].sum())}")
+                m1.metric("Faturamento Grupo", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum())}")
+                m2.metric("(-) Devoluções Grupo", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
+                m3.metric("DAS Total a Recolher", f"R$ {fmt_br(df_f['DAS'].sum())}")
             
             st.subheader("📋 Auditoria Detalhada (Por Unidade)")
             df_view = df.copy()
             df_view['V_Contabil'] = df_view['V_Contabil'].apply(fmt_br)
             df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
             st.dataframe(df_view[['Unidade_CNPJ', 'Nota', 'CFOP', 'Emitente', 'Destinatário', 'Categoria', 'Tipo', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota encontrada com o radical do CNPJ alvo.")
+        else: st.error("Nenhuma nota encontrada para o radical do grupo.")
 
 if __name__ == "__main__": main()
