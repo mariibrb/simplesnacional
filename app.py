@@ -1,6 +1,6 @@
 """
-Auditoria Fiscal de Alta Precisão (VERSÃO RESILIENTE)
-Foco: Correção de Leitura, Continuidade 55/65, Partilha Detalhada e Reset Funcional
+Auditoria Fiscal de Alta Precisão (VERSÃO BLINDADA CONTRA KEYERROR)
+Foco: Fidelidade Absoluta, Estabilidade de Colunas, Continuidade 55/65 e Partilha Detalhada
 """
 
 import zipfile
@@ -47,7 +47,6 @@ def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
 def extrair_dados_detalhados(conteudo, cnpj_alvo):
     regs = []
     try:
-        # Decodificação robusta para evitar travamentos
         conteudo_str = conteudo.decode('utf-8', errors='ignore').lstrip()
         
         # 1. NFSe (Municipal)
@@ -55,13 +54,9 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo):
             root = ET.fromstring(conteudo_str)
             ns_nfse = "{http://www.abrasf.org.br/nfse.xsd}"
             try:
-                # Tenta localizar número e valor em diferentes padrões
-                n_nota = root.find(f".//{ns_nfse}Numero").text if root.find(f".//{ns_nfse}Numero") is not None else "0"
-                v_serv_node = root.find(f".//{ns_nfse}ValorServicos")
-                v_serv = Decimal(v_serv_node.text) if v_serv_node is not None else Decimal("0")
-                emit_cnpj_node = root.find(f".//{ns_nfse}Cnpj")
-                emit_cnpj = limpar_cnpj(emit_cnpj_node.text) if emit_cnpj_node is not None else ""
-                
+                n_nota = root.find(f".//{ns_nfse}Numero").text
+                v_serv = Decimal(root.find(f".//{ns_nfse}ValorServicos").text)
+                emit_cnpj = limpar_cnpj(root.find(f".//{ns_nfse}Cnpj").text)
                 regs.append({
                     "Emitente": emit_cnpj, "Nota": int(n_nota), "Série": "SRV", "Espécie": "NFSe", 
                     "CFOP": "SERV", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_serv, 
@@ -83,16 +78,15 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo):
         especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
 
         det_primeiro = inf.find(f"{ns}det")
-        if det_primeiro is None: return []
+        cfop = det_primeiro.find(f"{ns}prod/{ns}CFOP").text.replace(".", "") if det_primeiro is not None else "0000"
         
-        cfop = det_primeiro.find(f"{ns}prod/{ns}CFOP").text.replace(".", "")
-        icms_node = det_primeiro.find(f"{ns}imposto/{ns}ICMS")
+        icms_node = det_primeiro.find(f"{ns}imposto/{ns}ICMS") if det_primeiro is not None else None
         possui_st = False
         if icms_node is not None:
-            # Varre tags de CSOSN (Simples) ou CST (Normal)
-            st_tags = [icms_node.find(f".//{ns}CSOSN"), icms_node.find(f".//{ns}CST")]
-            for tag in st_tags:
-                if tag is not None and tag.text in ["201", "202", "203", "500", "10", "60", "70"]:
+            # Varre CSOSN ou CST
+            tags = [icms_node.find(f".//{ns}CSOSN"), icms_node.find(f".//{ns}CST")]
+            for t in tags:
+                if t is not None and t.text in ["201", "202", "203", "500", "10", "60", "70"]:
                     possui_st = True
 
         v_total_nota = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
@@ -105,15 +99,13 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo):
             "CFOP": cfop, "ST": possui_st, "Anexo": anexo, "Base_DAS": v_total_nota, 
             "Categoria": categoria, "Chave": chave
         })
-    except Exception as e:
-        pass 
+    except: pass
     return regs
 
 def extrair_canceladas(conteudo):
     ch_canc = set()
     try:
-        conteudo_str = conteudo.decode('utf-8', errors='ignore').lstrip()
-        root = ET.fromstring(conteudo_str); ns = "{http://www.portalfiscal.inf.br/nfe}"
+        root = ET.fromstring(conteudo.decode('utf-8', errors='ignore').lstrip()); ns = "{http://www.portalfiscal.inf.br/nfe}"
         for ev in root.findall(f".//{ns}infEvento"):
             if ev.find(f"{ns}tpEvento").text == "110111": ch_canc.add(ev.find(f"{ns}chNFe").text)
         inf = root.find(f".//{ns}infNFe")
@@ -127,8 +119,7 @@ def processar_recursivo(arquivo_bytes, func, **kwargs):
         with zipfile.ZipFile(io.BytesIO(arquivo_bytes)) as z:
             for n in z.namelist():
                 c = z.read(n)
-                if n.lower().endswith('.zip'):
-                    results.extend(processar_recursivo(c, func, **kwargs))
+                if n.lower().endswith('.zip'): results.extend(processar_recursivo(c, func, **kwargs))
                 elif n.lower().endswith('.xml'):
                     res = func(c, **kwargs)
                     if isinstance(res, list): results.extend(res)
@@ -178,9 +169,9 @@ def main():
 
     with st.sidebar:
         st.header("👤 Perfil da Empresa")
-        cnpj_input = st.text_input("CNPJ (Emitente)", key=f"cnpj_{st.session_state.reset_key}")
+        cnpj_input = st.text_input("CNPJ", key=f"cnpj_{st.session_state.reset_key}")
         cnpj_alvo = limpar_cnpj(cnpj_input)
-        rbt12_raw = st.text_input("RBT12 Total", value="0,00", key=f"rbt12_{st.session_state.reset_key}")
+        rbt12_raw = st.text_input("RBT12", key=f"rbt12_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
         st.header("🧱 Regras")
@@ -195,28 +186,21 @@ def main():
             st.rerun()
 
     c1, c2 = st.columns(2)
-    with c1: f_norm = st.file_uploader("Notas (XML/ZIP)", accept_multiple_files=True, key=f"f1_{st.session_state.reset_key}")
-    with c2: f_canc = st.file_uploader("Cancelamentos (XML/ZIP)", accept_multiple_files=True, key=f"f2_{st.session_state.reset_key}")
+    with c1: f_norm = st.file_uploader("Notas", accept_multiple_files=True, key=f"f1_{st.session_state.reset_key}")
+    with c2: f_canc = st.file_uploader("Cancelamentos", accept_multiple_files=True, key=f"f2_{st.session_state.reset_key}")
 
-    if st.button("🚀 Iniciar Processamento"):
-        if not f_norm:
-            st.error("Por favor, suba os arquivos de notas.")
-            return
-        if not cnpj_alvo or rbt12 == 0:
-            st.error("Preencha o CNPJ e a RBT12 corretamente.")
-            return
+    if st.button("🚀 Iniciar Processamento") and f_norm:
+        if not cnpj_alvo or rbt12 == 0: st.error("Preencha CNPJ e RBT12."); return
         
-        with st.spinner("Lendo arquivos..."):
-            canc = set()
-            for f in f_canc:
-                res_c = processar_recursivo(f.read(), extrair_canceladas)
-                for item in res_c:
-                    if isinstance(item, set): canc.update(item)
-                    else: canc.add(item)
-            
-            regs_raw = []
-            for f in f_norm:
-                regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo))
+        canc = set()
+        for f in f_canc:
+            res_c = processar_recursivo(f.read(), extrair_canceladas)
+            for item in res_c:
+                if isinstance(item, set): canc.update(item)
+                else: canc.add(item)
+        
+        regs_raw = []
+        for f in f_norm: regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo))
         
         if regs_raw:
             df = pd.DataFrame(regs_raw).drop_duplicates(subset=['Chave'])
@@ -228,8 +212,6 @@ def main():
             if not df_propria.empty:
                 res_cont = df_propria.groupby(['Espécie', 'Série']).agg(Inicial=('Nota', 'min'), Final=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index()
                 st.table(res_cont)
-            else:
-                st.warning("Nenhuma nota de emissão própria encontrada para o CNPJ informado.")
 
             df_f = df[(df["Categoria"] == "RECEITA BRUTA") & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
             if v_loc_manual > 0:
@@ -249,10 +231,20 @@ def main():
                 for esp in sorted(df_f['Espécie'].unique()):
                     with st.expander(f"📌 Espécie {esp}", expanded=True):
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
-                        resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
-                        resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_efetiva_detalhada(r['Anexo'], r['ST'], rbt12, st_i), axis=1).apply(fmt_aliq)
-                        resumo['Faturamento'] = resumo['Base_DAS'].apply(fmt_br); resumo['Imposto DAS'] = resumo['DAS_Valor'].apply(fmt_br)
-                        st.table(resumo[['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Faturamento', 'DAS']])
+                        
+                        # --- AJUSTE DE BLINDAGEM KEYERROR ---
+                        # Agrupamos apenas pelas colunas que temos certeza que existem
+                        cols_group = [c for c in ['Anexo', 'CFOP', 'ST'] if c in df_esp.columns]
+                        resumo = df_esp.groupby(cols_group).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
+                        
+                        # Calculamos alíquota e formatamos para exibição
+                        resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_efetiva_detalhada(r['Anexo'], r.get('ST', False), rbt12, st_i), axis=1).apply(fmt_aliq)
+                        resumo['Faturamento'] = resumo['Base_DAS'].apply(fmt_br)
+                        resumo['DAS'] = resumo['DAS_Valor'].apply(fmt_br)
+                        
+                        # Exibimos apenas as colunas formatadas para a tabela final
+                        cols_view = [c for c in ['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Faturamento', 'DAS'] if c in resumo.columns]
+                        st.table(resumo[cols_view])
 
                 m1, m2 = st.columns(2)
                 m1.metric("Faturamento Líquido", f"R$ {fmt_br(df_f['Base_DAS'].sum())}")
@@ -261,7 +253,6 @@ def main():
                 st.subheader("📋 Auditoria Detalhada")
                 df_det = df_f.copy(); df_det['Base_DAS'] = df_det['Base_DAS'].apply(fmt_br)
                 st.dataframe(df_det[['Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Base_DAS']], use_container_width=True)
-        else:
-            st.error("Não foram encontrados dados válidos para o CNPJ informado nos XMLs.")
+        else: st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__": main()
