@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria de Elite (VERSÃO FINAL RIGOROSA)
-Foco: Continuidade Real 55/65, Locação LBM, Alíquotas PGDAS e Cor Rosa
+Sentinela Ecosystem - Auditoria de Elite (VERSÃO AUDITORIA FILTRADA)
+Foco: Auditoria Detalhada Única (Somente Notas Válidas), Continuidade 55/65, Locação e PGDAS
 """
 
 import zipfile
@@ -11,10 +11,10 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão absoluta para bater com o PGDAS
+# Precisão absoluta de 60 casas para bater com o PGDAS
 getcontext().prec = 60 
 
-# ─── BANCO DE DIRETRIZES ──────────────────────────────────────────────────
+# ─── BANCO DE DIRETRIZES FISCAIS (BASE DE DATA) ────────────────────────────
 DIRETRIZES_FISCAIS = {
     "08399950000142": {
         "nome": "LOGUS COMERCIO DE FERRAMENTAS",
@@ -23,7 +23,7 @@ DIRETRIZES_FISCAIS = {
     }
 }
 
-# ─── TABELAS DE PARTILHA ──────────────────────────────────────────────────
+# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS PGDAS) ───────────────────────────
 PARTILHA_ANEXO_I = {
     1: {'icms': Decimal("0.34")}, 2: {'icms': Decimal("0.34")},
     3: {'icms': Decimal("0.335")}, 4: {'icms': Decimal("0.335")},
@@ -43,13 +43,13 @@ CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
 CFOPS_VENDA = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "5401", "5403", "5405", "6101", "6102", "6401", "6403", "6404"}
 CFOPS_DEVOL = {"1201", "1202", "1411", "2201", "2202", "2411", "5201", "5202", "5411", "6201", "6202", "6411"}
 
-# ─── FUNÇÕES AUXILIARES ───────────────────────────────────────────────────
+# ─── FUNÇÕES DE SUPORTE ──────────────────────────────────────────────────────
 
 def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 def fmt_aliq(v): return f"{(v * 100):,.4f}".replace(".", ",") + "%"
 def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
 
-# ─── PROCESSAMENTO XML ─────────────────────────────────────────────────────
+# ─── PROCESSAMENTO XML POR ITEM ─────────────────────────────────────────────
 
 def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
     regs = []
@@ -66,8 +66,6 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
         
         ide = inf.find(f"{ns}ide")
         n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
-        
-        # Espécies: 55=36, 65=42
         especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
 
         for det in inf.findall(f"{ns}det"):
@@ -161,6 +159,7 @@ def main():
             .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
             .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
             .stTable { background-color: rgba(255, 255, 255, 0.4); border-radius: 10px; }
+            .stExpander { background-color: rgba(255, 255, 255, 0.2); border-radius: 10px; border: none; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -180,7 +179,7 @@ def main():
         loc_iii = st.checkbox("Anexo III: Locação?", value=config["anexo_iii"]["locacao"])
         
         st.subheader("💰 Input de Locação")
-        val_loc_raw = st.text_input("Faturamento Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
+        val_loc_raw = st.text_input("Faturamento Manual Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
         v_loc_manual = Decimal(val_loc_raw.replace(".", "").replace(",", "."))
         
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
@@ -204,25 +203,25 @@ def main():
         for f in f_norm: regs.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo, radical_grupo=rad))
         
         if regs:
+            # Drop duplicidades e Cancelamento
             df = pd.DataFrame(regs).drop_duplicates(subset=['Chave', 'Base_DAS', 'CFOP'])
             df['Cancelada'] = df['Chave'].isin(canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
 
-            # ─── 📊 RESUMO DE CONTINUIDADE (RESTAURADO E CORRIGIDO) ───
+            # Resumo de Continuidade (Somente Emissão Própria do Modelo 55/65)
             st.subheader("📊 Resumo de Continuidade (Emissão Própria)")
-            df_cont = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada'])].copy()
-            if not df_cont.empty:
-                # Aqui ele agrupa por espécie real (36 ou 42) e série
-                res_cont = df_cont.groupby(['Espécie', 'Série']).agg(
+            df_propria = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada'])].copy()
+            if not df_propria.empty:
+                res_cont = df_propria.groupby(['Espécie', 'Série']).agg(
                     Primeira_Nota=('Nota', 'min'),
                     Ultima_Nota=('Nota', 'max'),
                     Qtd_Lida=('Nota', 'nunique')
                 ).reset_index()
                 st.table(res_cont)
 
-            df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
+            # Filtrar apenas o que entra na apuração (Receita Bruta e Devolução Venda NÃO canceladas)
+            df_f = df[(df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
             
-            # Adicionar Valor de Locação LBM (Sem espécie "Manuel")
             if v_loc_manual > 0:
                 loc_row = pd.DataFrame([{
                     "Emitente": cnpj_alvo, "Nota": 0, "Espécie": "LBM", "Série": "LOC",
@@ -260,9 +259,15 @@ def main():
                 m2.metric("(-) Devoluções", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_DAS'].sum()))}")
                 m3.metric("Total DAS", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
 
-            st.subheader("📋 Auditoria Detalhada")
-            df_view = df.copy(); df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
-            st.dataframe(df_view[['Emitente', 'Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota processada.")
+                # ─── 📋 AUDITORIA DETALHADA (FILTRADA POR APURAÇÃO) ───
+                st.subheader("📋 Auditoria Detalhada (Apenas Notas Consideradas)")
+                # Agrupa por nota para garantir uma linha por documento, somando os itens
+                df_detalhe = df_f.groupby(['Emitente', 'Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Categoria']).agg({'Base_DAS': 'sum'}).reset_index()
+                df_detalhe['Base_DAS'] = df_detalhe['Base_DAS'].apply(fmt_br)
+                st.dataframe(df_detalhe, use_container_width=True)
+            else:
+                st.info("Nenhuma nota válida após os filtros de apuração.")
+        else:
+            st.error("Nenhuma nota lida.")
 
 if __name__ == "__main__": main()
