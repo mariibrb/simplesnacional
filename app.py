@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria de Elite Rihanna Mode (VERSÃO TOTAL E RIGOROSA)
-Foco: Continuidade 55/65, Alíquotas Híbridas (7,28% vs 4,95%), Multi-item e Rosa
+Sentinela Ecosystem - Auditoria Universal Rihanna Mode (VERSÃO INTEGRAL RESTAURADA)
+Foco: Banco de Dados de Diretrizes, Continuidade 55/65, Multi-item e Alíquotas PGDAS
 """
 
 import zipfile
@@ -11,8 +11,19 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão de 60 casas decimais para bater com as 13 casas do PGDAS
+# Precisão absoluta para bater com as 13 casas decimais do seu sistema
 getcontext().prec = 60 
+
+# ─── BANCO DE DIRETRIZES FISCAIS (BASE DE DADOS PARAMETRIZÁVEL) ────────────
+# Aqui você cadastra cada empresa. Se não estiver aqui, o sistema usa o padrão.
+DIRETRIZES_EMPRESAS = {
+    "08399950000142": {
+        "nome": "LOGUS COMERCIO DE FERRAMENTAS",
+        "anexo_i_st": True,   # Seção II - Substituição Tributária
+        "anexo_iii_regra": "CHEIA", # Usa a alíquota de 7,28% sem descontar ISS
+    },
+    # Adicione novos CNPJs aqui para tratar cada um de seu jeito
+}
 
 # ─── TABELAS DE PARTILHA (REGRAS OFICIAIS PGDAS) ───────────────────────────
 PARTILHA_ANEXO_I = {
@@ -21,11 +32,10 @@ PARTILHA_ANEXO_I = {
     5: {'icms': Decimal("0.335")}, 6: {'icms': Decimal("0.00")}
 }
 
-# Partilha Anexo III: O ISS é o que diferencia o Serviço da Locação
 PARTILHA_ANEXO_III = {
     1: {'iss': Decimal("0.32")}, 2: {'iss': Decimal("0.32")},
     3: {'iss': Decimal("0.325")}, 4: {'iss': Decimal("0.325")},
-    5: {'iss': Decimal("0.335")}, 6: {'iss': Decimal("0.00")}
+    5: {'iss': Decimal("0.335")}, 6: {'iss': Decimal("0.335")}
 }
 
 TABELA_ANEXO_I = [(1, 0, 180000, 0.04, 0), (2, 180000.01, 360000, 0.073, 5940), (3, 360000.01, 720000, 0.095, 13860), (4, 720000.01, 1800000, 0.107, 22500), (5, 1800000.01, 3600000, 0.143, 87300), (6, 3600000.01, 4800000, 0.19, 378000)]
@@ -33,7 +43,6 @@ TABELA_ANEXO_III = [(1, 0, 180000, 0.06, 0), (2, 180000.01, 360000, 0.112, 9360)
 
 CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
 CFOPS_VENDA = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "5401", "5403", "5405", "6101", "6102", "6401", "6403", "6404"}
-CFOPS_DEVOL = {"1201", "1202", "1411", "2201", "2202", "2411", "5201", "5202", "5411", "6201", "6202", "6411"}
 
 # ─── FUNÇÕES DE SUPORTE ──────────────────────────────────────────────────────
 
@@ -41,31 +50,30 @@ def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X
 def fmt_aliq(v): return f"{(v * 100):,.13f}".replace(".", ",") + "%"
 def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
 
-# ─── PROCESSAMENTO XML (VARRRE TODOS OS ITENS - MULTI-ITEM) ─────────────────
+# ─── PROCESSAMENTO XML (RIGOR MULTI-ITEM) ───────────────────────────────────
 
-def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
+def extrair_dados_detalhados(conteudo, cnpj_alvo):
     regs = []
     try:
         conteudo_str = conteudo.decode('utf-8', errors='ignore').lstrip()
-        # Identificação de NFSe (Municipal)
+        
+        # 1. NFSe (Municipal)
         if "<nfse" in conteudo_str.lower() or "<compnfse" in conteudo_str.lower():
+            root = ET.fromstring(conteudo_str)
+            ns_nfse = "{http://www.abrasf.org.br/nfse.xsd}"
             try:
-                # Extração Genérica de NFSe (Ajustável por Padrão de Prefeitura)
-                root = ET.fromstring(conteudo_str)
-                ns_nfse = "{http://www.abrasf.org.br/nfse.xsd}"
                 n_nota = root.find(f".//{ns_nfse}Numero").text
                 v_serv = Decimal(root.find(f".//{ns_nfse}ValorServicos").text)
                 emit_cnpj = limpar_cnpj(root.find(f".//{ns_nfse}Cnpj").text)
-                
                 regs.append({
                     "Emitente": emit_cnpj, "Nota": int(n_nota), "Série": "SRV", "Espécie": "NFSe", 
                     "CFOP": "SERV", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_serv, 
-                    "Categoria": "RECEITA BRUTA", "Chave": n_nota, "Is_Loc": False
+                    "Categoria": "RECEITA BRUTA", "Chave": n_nota
                 })
             except: pass
             return regs
 
-        # Processamento NFe (55) / NFCe (65)
+        # 2. NFe / NFCe (Estadual)
         root = ET.fromstring(conteudo_str)
         ns = "{http://www.portalfiscal.inf.br/nfe}"
         inf = root.find(f".//{ns}infNFe")
@@ -73,27 +81,20 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
         
         chave = inf.attrib.get('Id', '')[3:]
         emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
-        dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
-        dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
-        
         ide = inf.find(f"{ns}ide")
         n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
-        
-        # Rigor na Espécie: 55=36 (NFe), 65=42 (NFCe)
         especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
 
-        # PROCESSAMENTO INDIVIDUAL DE ITENS (Multi-item)
+        # VARREDURA POR ITEM (det)
         for det in inf.findall(f"{ns}det"):
             prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
             
-            # Detecção de ST por item
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
             if icms_node is not None:
                 csosn = icms_node.find(f".//{ns}CSOSN")
-                if csosn is not None and csosn.text in ["201", "202", "203", "500"]:
-                    possui_st = True
+                if csosn is not None and csosn.text in ["201", "202", "203", "500"]: possui_st = True
 
             v_p = Decimal(prod.find(f"{ns}vProd").text)
             v_d = Decimal(prod.find(f"{ns}vDesc").text) if prod.find(f"{ns}vDesc") is not None else Decimal("0")
@@ -101,19 +102,13 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             v_f = Decimal(prod.find(f"{ns}vFrete").text) if prod.find(f"{ns}vFrete") is not None else Decimal("0")
             base_item = (v_p - v_d + v_o + v_f).quantize(Decimal("0.01"), ROUND_HALF_UP)
             
-            categoria = "OUTROS"
-            if emit_cnpj == cnpj_alvo and tp_nf == "1":
-                if cfop in CFOPS_VENDA or cfop in CFOPS_SERVICO: categoria = "RECEITA BRUTA"
-            elif cfop in CFOPS_DEVOL:
-                if (emit_cnpj.startswith(radical_grupo) and tp_nf == "0") or (dest_cnpj.startswith(radical_grupo) and tp_nf == "1"):
-                    categoria = "DEVOLUÇÃO VENDA"
-
+            categoria = "RECEITA BRUTA" if emit_cnpj == cnpj_alvo and tp_nf == "1" else "OUTROS"
             anexo = "ANEXO III" if cfop in CFOPS_SERVICO else "ANEXO I"
 
             regs.append({
                 "Emitente": emit_cnpj, "Nota": n_nota, "Série": serie, "Espécie": especie, 
                 "CFOP": cfop, "ST": possui_st, "Anexo": anexo, "Base_DAS": base_item, 
-                "Categoria": categoria, "Chave": chave, "Is_Loc": False # XML é sempre Serviço (7,28%)
+                "Categoria": categoria, "Chave": chave
             })
     except: pass
     return regs
@@ -147,9 +142,9 @@ def processar_recursivo(arquivo_bytes, func, **kwargs):
         else: results.append(res)
     return results
 
-# ─── MOTOR DE CÁLCULO PGDAS (HÍBRIDO SERVIÇO vs LOCAÇÃO) ────────────────────
+# ─── MOTOR DE CÁLCULO PGDAS (FIDELIDADE POR CNPJ) ──────────────────────────
 
-def calcular_aliq_pgdas(anexo, possui_st, rb12, st_i, is_loc_manual):
+def calcular_aliq_fiel(anexo, possui_st, rb12, st_i, regra_anexo_iii):
     tab, partilha = (TABELA_ANEXO_I, PARTILHA_ANEXO_I) if anexo == "ANEXO I" else (TABELA_ANEXO_III, PARTILHA_ANEXO_III)
     faixa = tab[0]; f_idx = 1
     for f in tab:
@@ -157,21 +152,19 @@ def calcular_aliq_pgdas(anexo, possui_st, rb12, st_i, is_loc_manual):
         faixa = f; f_idx = f[0]
     
     ae_bruta = ((rb12 * Decimal(str(faixa[3]))) - Decimal(str(faixa[4]))) / rb12
-    p = partilha[f_idx]
-    
     red = Decimal("0")
+    
     if anexo == "ANEXO I" and st_i and possui_st: 
-        red = p.get('icms', 0)
-    elif anexo == "ANEXO III" and is_loc_manual: 
-        # Reduz o ISS apenas para a linha de Locação Manual
-        red = p.get('iss', 0)
-        
+        red = partilha[f_idx].get('icms', 0)
+    elif anexo == "ANEXO III" and regra_anexo_iii == "LOCACAO":
+        red = partilha[f_idx].get('iss', 0)
+    
     return ae_bruta * (Decimal("1") - red)
 
-# ─── INTERFACE STREAMLIT (ROSA RIHANNA MODE) ─────────────────────────────────
+# ─── INTERFACE STREAMLIT (RESTAURO RIHANNA MODE) ────────────────────────────
 
 def main():
-    st.set_page_config(page_title="Sentinela Group - Auditoria Total", layout="wide")
+    st.set_page_config(page_title="Sentinela Universal", layout="wide")
     st.markdown("""
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
@@ -189,27 +182,37 @@ def main():
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
-        st.header("👤 Perfil Empresa")
+        st.header("👤 Perfil da Empresa")
         cnpj_input = st.text_input("CNPJ Auditado", key=f"c_{st.session_state.reset_key}")
-        cnpj_alvo = limpar_cnpj(cnpj_input); rad = cnpj_alvo[:8] if cnpj_alvo else ""
-        rbt12_raw = st.text_input("RBT12 Total", key=f"r_{st.session_state.reset_key}")
+        cnpj_alvo = limpar_cnpj(cnpj_input)
+        
+        rbt12_raw = st.text_input("RBT12 Total do Grupo", key=f"r_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
-        st.header("🧱 Regras PGDAS")
-        st_i = st.checkbox("Anexo I: ST (ICMS 0)?", value=True)
-        
-        st.subheader("💰 Locação Manual")
-        val_loc_raw = st.text_input("Valor de Locação (ISS 0)", value="0,00", key=f"loc_{st.session_state.reset_key}")
+        st.header("⚙️ Parametrização")
+        # Busca no banco de diretrizes se o CNPJ já existe
+        if cnpj_alvo in DIRETRIZES_EMPRESAS:
+            config = DIRETRIZES_EMPRESAS[cnpj_alvo]
+            st.success(f"Empresa Identificada: {config['nome']}")
+            st_i = st.checkbox("Anexo I: Possui ST?", value=config['anexo_i_st'])
+            regra_iii = st.selectbox("Regra Anexo III", ["CHEIA", "LOCACAO"], index=0 if config['anexo_iii_regra']=="CHEIA" else 1)
+        else:
+            st.warning("CNPJ não cadastrado. Defina as regras:")
+            st_i = st.checkbox("Anexo I: Possui ST?", value=True)
+            regra_iii = st.selectbox("Regra Anexo III", ["CHEIA", "LOCACAO"], index=0)
+
+        st.subheader("💰 Input de Locação")
+        val_loc_raw = st.text_input("Faturamento Manual Locação", value="0,00", key=f"loc_{st.session_state.reset_key}")
         v_loc_manual = Decimal(val_loc_raw.replace(".", "").replace(",", "."))
         
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
 
     c1, c2 = st.columns(2)
-    with c1: f_norm = st.file_uploader("Movimentação ZIP/XML (NFe/NFCe/NFSe)", accept_multiple_files=True)
-    with c2: f_canc = st.file_uploader("Canceladas ZIP/XML", accept_multiple_files=True)
+    with c1: f_norm = st.file_uploader("Movimentação (NFe/NFCe/NFSe)", accept_multiple_files=True)
+    with c2: f_canc = st.file_uploader("Canceladas (XML/ZIP)", accept_multiple_files=True)
 
     if st.button("🚀 Iniciar Auditoria") and f_norm:
-        if not cnpj_alvo or rbt12 == 0: st.error("Dados incompletos."); return
+        if not cnpj_alvo or rbt12 == 0: st.error("CNPJ e RBT12 são obrigatórios."); return
         
         canc = set()
         for f in f_canc:
@@ -219,42 +222,39 @@ def main():
                 else: canc.add(item)
         
         regs_raw = []
-        for f in f_norm: regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo, radical_grupo=rad))
+        for f in f_norm: regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo))
         
         if regs_raw:
             df = pd.DataFrame(regs_raw)
             df['Cancelada'] = df['Chave'].isin(canc)
-            
+            df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
+
             # ─── 📊 RESUMO DE CONTINUIDADE (RESTAURADO PARA 36 E 42) ───
             st.subheader("📊 Resumo de Continuidade (Emissão Própria)")
-            df_cont = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada']) & (df['Espécie'].isin(["36", "42"]))].copy()
-            if not df_cont.empty:
-                res_cont = df_cont.groupby(['Espécie', 'Série']).agg(
+            df_propria = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada']) & (df['Espécie'].isin(["36", "42"]))].copy()
+            if not df_propria.empty:
+                res_cont = df_propria.groupby(['Espécie', 'Série']).agg(
                     Primeira_Nota=('Nota', 'min'),
                     Ultima_Nota=('Nota', 'max'),
                     Qtd_Lida=('Nota', 'nunique')
                 ).reset_index()
-                # Tradução visual para o usuário
-                res_cont['Modelo'] = res_cont['Espécie'].apply(lambda x: "55 (NFe)" if x=="36" else "65 (NFCe)")
-                st.table(res_cont[['Modelo', 'Série', 'Primeira_Nota', 'Ultima_Nota', 'Qtd_Lida']])
+                st.table(res_cont)
 
-            # Filtro para Apuração
-            df_f = df[(df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
+            # Filtro para apuração
+            df_f = df[(df["Categoria"] == "RECEITA BRUTA") & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
             
-            # Valor de Locação Manual (ISS 0)
             if v_loc_manual > 0:
                 loc_row = pd.DataFrame([{
                     "Emitente": cnpj_alvo, "Nota": 0, "Espécie": "LOCAÇÃO", "Série": "MANUAL",
                     "CFOP": "LOC", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_loc_manual,
-                    "Categoria": "RECEITA BRUTA", "Cancelada": False, "Chave": "M_LOC", "Is_Loc": True
+                    "Categoria": "RECEITA BRUTA", "Cancelada": False, "Chave": "M_LOC"
                 }])
                 df_f = pd.concat([df_f, loc_row], ignore_index=True)
 
             if not df_f.empty:
                 def calc_row(row):
-                    af = calcular_aliq_pgdas(row['Anexo'], row['ST'], rbt12, st_i, row['Is_Loc'])
-                    mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
-                    das = ((row['Base_DAS'] * mult) * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                    af = calcular_aliq_fiel(row['Anexo'], row['ST'], rbt12, st_i, regra_iii)
+                    das = (row['Base_DAS'] * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
                     return af, das
 
                 res_f = df_f.apply(calc_row, axis=1, result_type='expand')
@@ -262,27 +262,26 @@ def main():
 
                 st.subheader("📑 Memorial Analítico por Espécie")
                 for esp in sorted(df_f['Espécie'].unique()):
-                    label = "Espécie 36 (NF-e)" if esp=="36" else "Espécie 42 (NFC-e)" if esp=="42" else esp
-                    with st.expander(f"📌 {label}", expanded=True):
+                    with st.expander(f"📌 Espécie {esp}", expanded=True):
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
-                        resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST', 'Is_Loc']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
-                        resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_pgdas(r['Anexo'], r['ST'], rbt12, st_i, r['Is_Loc']), axis=1).apply(fmt_aliq)
+                        resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
+                        resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_fiel(r['Anexo'], r['ST'], rbt12, st_i, regra_iii), axis=1).apply(fmt_aliq)
                         resumo['Base PGDAS'] = resumo['Base_DAS'].apply(fmt_br); resumo['Imposto DAS'] = resumo['DAS_Valor'].apply(fmt_br)
                         st.table(resumo[['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
 
                 st.subheader("🧱 Consolidação por Anexo")
                 res_an = df_f.groupby('Anexo').agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
+                res_an['Alíquota (%)'] = res_an.apply(lambda r: calcular_aliq_fiel(r['Anexo'], True if r['Anexo']=="ANEXO I" else False, rbt12, st_i, regra_iii), axis=1).apply(fmt_aliq)
                 res_an['Base Líquida'] = res_an['Base_DAS'].apply(fmt_br); res_an['Total DAS'] = res_an['DAS_Valor'].apply(fmt_br)
-                st.table(res_an[['Anexo', 'Base Líquida', 'Total DAS']])
+                st.table(res_an[['Anexo', 'Alíquota (%)', 'Base Líquida', 'Total DAS']])
 
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Bruto Auditado", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_DAS'].sum())}")
-                m2.metric("Total DAS", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
-                m3.metric("Alíq. Média", fmt_aliq(df_f['DAS_Valor'].sum() / df_f['Base_DAS'].sum()) if df_f['Base_DAS'].sum() > 0 else "0%")
+                m1.metric("Faturamento Líquido", f"R$ {fmt_br(df_f['Base_DAS'].sum())}")
+                m2.metric("Total DAS Grupo", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
+                m3.metric("Simples a Recolher", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
 
                 st.subheader("📋 Auditoria Detalhada (Uma Linha por Nota)")
-                # Agrupamento para consolidar itens da mesma nota na auditoria
-                df_detalhe = df_f.groupby(['Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Is_Loc']).agg({'Base_DAS': 'sum'}).reset_index()
+                df_detalhe = df_f.groupby(['Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo']).agg({'Base_DAS': 'sum'}).reset_index()
                 df_detalhe['Base_DAS'] = df_detalhe['Base_DAS'].apply(fmt_br)
                 st.dataframe(df_detalhe, use_container_width=True)
         else: st.error("Nenhuma nota processada.")
