@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria de Precisão Máxima (VERSÃO NFSe + LOCAÇÃO)
-Foco: Bater 7,28% (NFSe/Serviço) e 4,95% (Locação Manual) no Anexo III
+Sentinela Ecosystem - Auditoria de Elite Rihanna Mode (VERSÃO TOTAL E RIGOROSA)
+Foco: Continuidade 55/65, Alíquotas Híbridas (7,28% vs 4,95%), Multi-item e Rosa
 """
 
 import zipfile
@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão de 60 casas para bater com as 13 casas do PGDAS
+# Precisão de 60 casas decimais para bater com as 13 casas do PGDAS
 getcontext().prec = 60 
 
 # ─── TABELAS DE PARTILHA (REGRAS OFICIAIS PGDAS) ───────────────────────────
@@ -33,29 +33,26 @@ TABELA_ANEXO_III = [(1, 0, 180000, 0.06, 0), (2, 180000.01, 360000, 0.112, 9360)
 
 CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
 CFOPS_VENDA = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "5401", "5403", "5405", "6101", "6102", "6401", "6403", "6404"}
+CFOPS_DEVOL = {"1201", "1202", "1411", "2201", "2202", "2411", "5201", "5202", "5411", "6201", "6202", "6411"}
 
 # ─── FUNÇÕES DE SUPORTE ──────────────────────────────────────────────────────
 
 def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-def fmt_aliq(v): return f"{(v * 100):,.4f}".replace(".", ",") + "%"
+def fmt_aliq(v): return f"{(v * 100):,.13f}".replace(".", ",") + "%"
 def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
 
-# ─── PROCESSAMENTO XML (VARRRE TODOS OS ITENS - det) ─────────────────────────
+# ─── PROCESSAMENTO XML (VARRRE TODOS OS ITENS - MULTI-ITEM) ─────────────────
 
 def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
     regs = []
     try:
         conteudo_str = conteudo.decode('utf-8', errors='ignore').lstrip()
-        # Detecção de NFSe (Municipal) vs NFe/NFCe (Estadual)
-        is_nfse = "<nfse" in conteudo_str.lower() or "<compnfse" in conteudo_str.lower()
-        
-        root = ET.fromstring(conteudo_str)
-        
-        if is_nfse:
-            # Lógica Simplificada para NFSe (Mapeia como Serviço)
-            # Obs: Ajustar caminhos de tags conforme o padrão da sua prefeitura se necessário
+        # Identificação de NFSe (Municipal)
+        if "<nfse" in conteudo_str.lower() or "<compnfse" in conteudo_str.lower():
             try:
-                ns_nfse = "{http://www.abrasf.org.br/nfse.xsd}" # Exemplo padrão ABRASF
+                # Extração Genérica de NFSe (Ajustável por Padrão de Prefeitura)
+                root = ET.fromstring(conteudo_str)
+                ns_nfse = "{http://www.abrasf.org.br/nfse.xsd}"
                 n_nota = root.find(f".//{ns_nfse}Numero").text
                 v_serv = Decimal(root.find(f".//{ns_nfse}ValorServicos").text)
                 emit_cnpj = limpar_cnpj(root.find(f".//{ns_nfse}Cnpj").text)
@@ -68,26 +65,34 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             except: pass
             return regs
 
-        # Lógica NFe / NFCe
+        # Processamento NFe (55) / NFCe (65)
+        root = ET.fromstring(conteudo_str)
         ns = "{http://www.portalfiscal.inf.br/nfe}"
         inf = root.find(f".//{ns}infNFe")
         if inf is None: return []
         
         chave = inf.attrib.get('Id', '')[3:]
         emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
+        dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
+        dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
+        
         ide = inf.find(f"{ns}ide")
         n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
+        
+        # Rigor na Espécie: 55=36 (NFe), 65=42 (NFCe)
         especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
 
+        # PROCESSAMENTO INDIVIDUAL DE ITENS (Multi-item)
         for det in inf.findall(f"{ns}det"):
             prod, impo = det.find(f"{ns}prod"), det.find(f"{ns}imposto")
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
             
+            # Detecção de ST por item
             icms_node = impo.find(f".//{ns}ICMS")
             possui_st = False
             if icms_node is not None:
-                csosn_tag = icms_node.find(f".//{ns}CSOSN")
-                if csosn_tag is not None and csosn_tag.text in ["201", "202", "203", "500"]:
+                csosn = icms_node.find(f".//{ns}CSOSN")
+                if csosn is not None and csosn.text in ["201", "202", "203", "500"]:
                     possui_st = True
 
             v_p = Decimal(prod.find(f"{ns}vProd").text)
@@ -99,13 +104,16 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             categoria = "OUTROS"
             if emit_cnpj == cnpj_alvo and tp_nf == "1":
                 if cfop in CFOPS_VENDA or cfop in CFOPS_SERVICO: categoria = "RECEITA BRUTA"
-            
+            elif cfop in CFOPS_DEVOL:
+                if (emit_cnpj.startswith(radical_grupo) and tp_nf == "0") or (dest_cnpj.startswith(radical_grupo) and tp_nf == "1"):
+                    categoria = "DEVOLUÇÃO VENDA"
+
             anexo = "ANEXO III" if cfop in CFOPS_SERVICO else "ANEXO I"
 
             regs.append({
                 "Emitente": emit_cnpj, "Nota": n_nota, "Série": serie, "Espécie": especie, 
                 "CFOP": cfop, "ST": possui_st, "Anexo": anexo, "Base_DAS": base_item, 
-                "Categoria": categoria, "Chave": chave, "Is_Loc": False
+                "Categoria": categoria, "Chave": chave, "Is_Loc": False # XML é sempre Serviço (7,28%)
             })
     except: pass
     return regs
@@ -163,7 +171,7 @@ def calcular_aliq_pgdas(anexo, possui_st, rb12, st_i, is_loc_manual):
 # ─── INTERFACE STREAMLIT (ROSA RIHANNA MODE) ─────────────────────────────────
 
 def main():
-    st.set_page_config(page_title="Sentinela Auditoria", layout="wide")
+    st.set_page_config(page_title="Sentinela Group - Auditoria Total", layout="wide")
     st.markdown("""
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
@@ -173,6 +181,7 @@ def main():
             .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
             .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
             .stTable { background-color: rgba(255, 255, 255, 0.4); border-radius: 10px; }
+            .stExpander { background-color: rgba(255, 255, 255, 0.2); border-radius: 10px; border: none; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -187,7 +196,7 @@ def main():
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
         st.header("🧱 Regras PGDAS")
-        st_i = st.checkbox("Anexo I: Possui ST (ICMS 0)?", value=True)
+        st_i = st.checkbox("Anexo I: ST (ICMS 0)?", value=True)
         
         st.subheader("💰 Locação Manual")
         val_loc_raw = st.text_input("Valor de Locação (ISS 0)", value="0,00", key=f"loc_{st.session_state.reset_key}")
@@ -216,21 +225,23 @@ def main():
             df = pd.DataFrame(regs_raw)
             df['Cancelada'] = df['Chave'].isin(canc)
             
-            # 📊 CONTINUIDADE (Apenas Emissão Própria real)
-            st.subheader("📊 Resumo de Continuidade (NF-e / NFC-e)")
-            df_cont = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada']) & (df['Espécie'] != "NFSe")].copy()
+            # ─── 📊 RESUMO DE CONTINUIDADE (RESTAURADO PARA 36 E 42) ───
+            st.subheader("📊 Resumo de Continuidade (Emissão Própria)")
+            df_cont = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada']) & (df['Espécie'].isin(["36", "42"]))].copy()
             if not df_cont.empty:
                 res_cont = df_cont.groupby(['Espécie', 'Série']).agg(
                     Primeira_Nota=('Nota', 'min'),
                     Ultima_Nota=('Nota', 'max'),
                     Qtd_Lida=('Nota', 'nunique')
                 ).reset_index()
-                st.table(res_cont)
+                # Tradução visual para o usuário
+                res_cont['Modelo'] = res_cont['Espécie'].apply(lambda x: "55 (NFe)" if x=="36" else "65 (NFCe)")
+                st.table(res_cont[['Modelo', 'Série', 'Primeira_Nota', 'Ultima_Nota', 'Qtd_Lida']])
 
             # Filtro para Apuração
             df_f = df[(df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
             
-            # Valor de Locação Manual (Caminho da Redução do ISS)
+            # Valor de Locação Manual (ISS 0)
             if v_loc_manual > 0:
                 loc_row = pd.DataFrame([{
                     "Emitente": cnpj_alvo, "Nota": 0, "Espécie": "LOCAÇÃO", "Série": "MANUAL",
@@ -251,7 +262,8 @@ def main():
 
                 st.subheader("📑 Memorial Analítico por Espécie")
                 for esp in sorted(df_f['Espécie'].unique()):
-                    with st.expander(f"📌 {esp}", expanded=True):
+                    label = "Espécie 36 (NF-e)" if esp=="36" else "Espécie 42 (NFC-e)" if esp=="42" else esp
+                    with st.expander(f"📌 {label}", expanded=True):
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
                         resumo = df_esp.groupby(['Anexo', 'CFOP', 'ST', 'Is_Loc']).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
                         resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_pgdas(r['Anexo'], r['ST'], rbt12, st_i, r['Is_Loc']), axis=1).apply(fmt_aliq)
@@ -269,6 +281,7 @@ def main():
                 m3.metric("Alíq. Média", fmt_aliq(df_f['DAS_Valor'].sum() / df_f['Base_DAS'].sum()) if df_f['Base_DAS'].sum() > 0 else "0%")
 
                 st.subheader("📋 Auditoria Detalhada (Uma Linha por Nota)")
+                # Agrupamento para consolidar itens da mesma nota na auditoria
                 df_detalhe = df_f.groupby(['Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Is_Loc']).agg({'Base_DAS': 'sum'}).reset_index()
                 df_detalhe['Base_DAS'] = df_detalhe['Base_DAS'].apply(fmt_br)
                 st.dataframe(df_detalhe, use_container_width=True)
