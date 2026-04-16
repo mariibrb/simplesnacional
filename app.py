@@ -1,6 +1,6 @@
 """
-Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - FIX RESET ANEXOS)
-Foco: PGDAS Matriz/Filiais, Alíquota sobre RBT12, Estilo Rihanna e Reset Total
+Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - DETALHAMENTO POR ANEXO)
+Foco: PGDAS Matriz/Filiais, Alíquota sobre RBT12, Estilo Rihanna e Memorial por Nota
 """
 
 import zipfile
@@ -71,6 +71,7 @@ st.markdown("""
         .stMetric { background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }
         .stButton>button { background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }
         .stTable { background-color: rgba(255, 255, 255, 0.4); border-radius: 10px; }
+        .stExpander { background-color: rgba(255, 255, 255, 0.2); border-radius: 10px; border: none; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -175,9 +176,8 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Matriz e Filiais")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Consolidada")
     
-    # Gerenciador de Estado de Reset (Protocolo de Chave Dinâmica)
     if 'reset_key' not in st.session_state:
         st.session_state.reset_key = 0
 
@@ -190,29 +190,25 @@ def main():
         rbt12_raw = st.text_input("RBT12 Total do Grupo", value="", key=f"rbt12_in_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
-        # O Botão de Reset agora incrementa a chave, forçando a limpeza física dos uploaders
         if st.button("🗑️ Resetar Tudo"):
             st.session_state.reset_key += 1
             st.rerun()
 
     c1, c2 = st.columns(2)
-    # Uploaders vinculados à reset_key para limpeza efetiva
     with c1: 
-        f_norm = st.file_uploader("Movimentação Grupo", accept_multiple_files=True, type=["xml", "zip"], key=f"uploader_norm_{st.session_state.reset_key}")
+        f_norm = st.file_uploader("Movimentação Grupo", accept_multiple_files=True, type=["xml", "zip"], key=f"u1_{st.session_state.reset_key}")
     with c2: 
-        f_canc = st.file_uploader("Canceladas Grupo", accept_multiple_files=True, type=["xml", "zip"], key=f"uploader_canc_{st.session_state.reset_key}")
+        f_canc = st.file_uploader("Canceladas Grupo", accept_multiple_files=True, type=["xml", "zip"], key=f"u2_{st.session_state.reset_key}")
 
-    if st.button("🚀 Iniciar Auditoria") and f_norm:
+    if st.button("🚀 Iniciar Auditoria Grupo") and f_norm:
         if not radical or rbt12 == 0:
             st.error("Informe o CNPJ e o RBT12 Acumulado."); return
 
         ch_canc = set()
-        for f in f_canc: 
-            ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
+        for f in f_canc: ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
 
         ch_vistas, regs = set(), []
-        for f in f_norm: 
-            regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, radical_cnpj=radical))
+        for f in f_norm: regs.extend(processar_recursivo_generic(f.read(), extrair_dados_xml, chaves_vistas=ch_vistas, radical_cnpj=radical))
         
         if regs:
             df = pd.DataFrame(regs)
@@ -248,17 +244,23 @@ def main():
                 res_fisc = df_f.apply(calcular_das, axis=1, result_type='expand')
                 df_f['Aliq_F'], df_f['Base_F'], df_f['DAS'] = res_fisc[0], res_fisc[1], res_fisc[2]
 
-                st.subheader("📊 Resumo de Continuidade (Somente Base PGDAS)")
-                st.table(df_f[~df_f['Cancelada']].groupby(['Unidade_CNPJ', 'Categoria', 'Série']).agg(Nota_Ini=('Nota', 'min'), Nota_Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index())
-
-                st.subheader("📑 Memorial Analítico Consolidado (Grupo)")
+                st.subheader("📑 Memorial Analítico Unificado")
                 resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
                 resumo['Aliq_Ef'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
                 
-                resumo['Aliq (%)'] = resumo['Aliq_Ef'].apply(fmt_aliq)
-                resumo['Base PGDAS'] = resumo['Base_F'].apply(fmt_br)
-                resumo['Imposto DAS'] = resumo['DAS'].apply(fmt_br)
-                st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
+                res_display = resumo.copy()
+                res_display['Aliq (%)'] = res_display['Aliq_Ef'].apply(fmt_aliq)
+                res_display['Base PGDAS'] = res_display['Base_F'].apply(fmt_br)
+                res_display['Imposto DAS'] = res_display['DAS'].apply(fmt_br)
+                st.table(res_display[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
+
+                # ─── NOVO: DETALHAMENTO DE NOTAS POR ANEXO ───
+                st.subheader("🔍 Quais notas compõem cada grupo?")
+                for name, group in df_f.groupby(['Anexo', 'Categoria']):
+                    with st.expander(f"Ver notas do {name[0]} - {name[1]}"):
+                        notas_anexo = group[group['Base_DAS'] != 0].copy()
+                        notas_anexo['Valor'] = notas_anexo['Base_DAS'].apply(fmt_br)
+                        st.dataframe(notas_anexo[['Unidade_CNPJ', 'Nota', 'Série', 'CFOP', 'ST', 'Valor', 'Tipo']], use_container_width=True)
 
                 st.markdown("---")
                 m1, m2, m3 = st.columns(3)
@@ -266,7 +268,7 @@ def main():
                 m2.metric("(-) Devoluções Grupo", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
                 m3.metric("DAS Total a Recolher", f"R$ {fmt_br(df_f['DAS'].sum())}")
             
-            st.subheader("📋 Auditoria Detalhada")
+            st.subheader("📋 Auditoria Detalhada (Todas as notas)")
             st.dataframe(df[['Unidade_CNPJ', 'Nota', 'CFOP', 'Categoria', 'Base_DAS', 'Cancelada']], use_container_width=True)
         else: st.error("Nenhuma nota encontrada.")
 
