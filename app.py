@@ -1,6 +1,6 @@
 """
-Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - CORREÇÃO DE ALÍQUOTA)
-Foco: PGDAS Matriz/Filiais, Cálculo Único de Alíquota Efetiva por Grupo e Estilo Rihanna
+Sentinela Group - Auditoria Consolidada (VERSÃO INTEGRAL - CORREÇÃO DE ALÍQUOTA PGDAS)
+Foco: PGDAS Matriz/Filiais, Cálculo de Alíquota Efetiva sobre RBT12 e Estilo Rihanna
 """
 
 import zipfile
@@ -14,23 +14,25 @@ import pandas as pd
 # Precisão interna de 60 casas para cálculos fiscais de alta fidelidade
 getcontext().prec = 60 
 
-# ─── REGRAS FISCAIS UNIVERSAIS (6 FAIXAS COMPLETAS) ─────────────────────────
+# ─── REGRAS FISCAIS UNIVERSAIS (TABELAS OFICIAIS) ───────────────────────────
+# Estrutura: (Faixa, Limite_Inf, Limite_Sup, Aliq_Nominal, Valor_Deduzir, Perc_ICMS)
 TABELA_ANEXO_I = [
-    (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.3350")),
-    (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.3350")),
-    (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.095"), Decimal("13860.00"), Decimal("0.3350")),
-    (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00"), Decimal("0.3350")),
-    (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.143"), Decimal("87300.00"), Decimal("0.3350")),
-    (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.19"), Decimal("378000.00"), Decimal("0.3350")),
+    (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.04"), Decimal("0.00"), Decimal("0.34")),
+    (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.073"), Decimal("5940.00"), Decimal("0.34")),
+    (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.095"), Decimal("13860.00"), Decimal("0.335")),
+    (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.107"), Decimal("22500.00"), Decimal("0.335")),
+    (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.143"), Decimal("87300.00"), Decimal("0.335")),
+    (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.19"), Decimal("378000.00"), Decimal("0.335")),
 ]
 
+# Estrutura: (Faixa, Limite_Inf, Limite_Sup, Aliq_Nominal, Valor_Deduzir, Perc_IPI_ICMS)
 TABELA_ANEXO_II = [
-    (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.045"), Decimal("0.00"), Decimal("0.3200")),
-    (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.078"), Decimal("5940.00"), Decimal("0.3200")),
-    (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.10"), Decimal("13860.00"), Decimal("0.3200")),
-    (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.112"), Decimal("22500.00"), Decimal("0.3200")),
-    (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.147"), Decimal("85500.00"), Decimal("0.3200")),
-    (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.30"), Decimal("720000.00"), Decimal("0.3200")),
+    (1, Decimal("0.00"), Decimal("180000.00"), Decimal("0.045"), Decimal("0.00"), Decimal("0.32")),
+    (2, Decimal("180000.01"), Decimal("360000.00"), Decimal("0.078"), Decimal("5940.00"), Decimal("0.32")),
+    (3, Decimal("360000.01"), Decimal("720000.00"), Decimal("0.10"), Decimal("13860.00"), Decimal("0.32")),
+    (4, Decimal("720000.01"), Decimal("1800000.00"), Decimal("0.112"), Decimal("22500.00"), Decimal("0.32")),
+    (5, Decimal("1800000.01"), Decimal("3600000.00"), Decimal("0.147"), Decimal("85500.00"), Decimal("0.32")),
+    (6, Decimal("3600000.01"), Decimal("4800000.00"), Decimal("0.30"), Decimal("720000.00"), Decimal("0.32")),
 ]
 
 CFOPS_VENDA = {
@@ -120,29 +122,24 @@ def extrair_dados_xml(conteudo, chaves_vistas, radical_cnpj):
             v_outro = Decimal(prod.find(f"{ns}vOutro").text) if prod.find(f"{ns}vOutro") is not None else Decimal("0")
             v_frete = Decimal(prod.find(f"{ns}vFrete").text) if prod.find(f"{ns}vFrete") is not None else Decimal("0")
             
-            v_st, v_ipi = Decimal("0"), Decimal("0")
+            v_st = Decimal("0")
             icms = impo.find(f".//{ns}ICMS")
             if icms is not None:
                 vst = icms.find(f".//{ns}vICMSST")
                 if vst is not None: v_st = Decimal(vst.text)
-            ipi = impo.find(f".//{ns}IPI")
-            if ipi is not None:
-                vipi = ipi.find(f".//{ns}vIPI")
-                if vipi is not None: v_ipi = Decimal(vipi.text)
 
-            v_contabil = (v_p + v_ipi + v_st + v_outro + v_frete - v_desc).quantize(Decimal("0.01"), ROUND_HALF_UP)
             base_das = (v_p - v_desc + v_outro + v_frete).quantize(Decimal("0.01"), ROUND_HALF_UP)
             cfop = prod.find(f"{ns}CFOP").text.replace(".", "")
             
             categoria = "OUTROS"
             if is_o_emissor_grupo: 
-                if tp_nf == "1": # Saída do Grupo
+                if tp_nf == "1": # Saída Grupo
                     if cfop in CFOPS_VENDA and cfop not in CFOPS_EXCLUSAO_SOMA:
                         categoria = "RECEITA BRUTA"
-                else: # Entrada Grupo (Devolução Própria)
+                else: # Entrada Própria
                     if cfop in CFOPS_DEVOL_VEN_PROPRIA:
                         categoria = "DEVOLUÇÃO VENDA"
-            else: # Terceiro devolvendo para o Grupo
+            else: # Terceiro devolvendo
                 if tp_nf == "1" and is_o_destinatario_grupo:
                     if cfop in CFOPS_DEVOL_VEN_TERCEIRO:
                         categoria = "DEVOLUÇÃO VENDA"
@@ -150,10 +147,10 @@ def extrair_dados_xml(conteudo, chaves_vistas, radical_cnpj):
             regs.append({
                 "Unidade_CNPJ": emit_cnpj if is_o_emissor_grupo else dest_cnpj,
                 "Nota": n_nota, "Série": serie, "Modelo": modelo,
-                "CFOP": cfop, "ST": cfop in CFOPS_ST, "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
-                "V_Contabil": v_contabil, "V_ST": v_st, "V_IPI": v_ipi,
+                "CFOP": cfop, "ST": cfop in CFOPS_ST, 
+                "Anexo": "ANEXO II" if cfop in CFOPS_INDUSTRIA else "ANEXO I",
                 "Base_DAS": base_das, "Tipo": "SAÍDA" if tp_nf == "1" else "ENTRADA",
-                "Categoria": categoria, "Chave": chave, "Emitente": emit_cnpj, "Destinatário": dest_cnpj
+                "Categoria": categoria, "Chave": chave
             })
         chaves_vistas.add(chave)
     except: pass
@@ -180,7 +177,7 @@ def processar_recursivo_generic(arquivo_bytes, func_target, **kwargs):
 # ─── MOTOR DE CÁLCULO E INTERFACE ────────────────────────────────────────────
 
 def main():
-    st.title("🛡️ Sentinela Ecosystem - Auditoria Consolidada")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Matriz e Filiais")
     
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
@@ -190,9 +187,8 @@ def main():
         radical = limpar_cnpj(cnpj_input)[:8] if cnpj_input else ""
         
         st.header("⚙️ Parâmetros Consolidados")
-        rbt12_raw = st.text_input("RBT12 Unificado do Grupo", value="", key=f"r_{st.session_state.reset_key}")
-        rbt12_clean = rbt12_raw.replace(".", "").replace(",", ".")
-        rbt12 = Decimal(rbt12_clean) if rbt12_clean else Decimal("0")
+        rbt12_raw = st.text_input("RBT12 Total do Grupo", value="", key=f"r_{st.session_state.reset_key}")
+        rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
         
         if st.button("🗑️ Resetar Tudo"):
             st.session_state.reset_key += 1
@@ -202,9 +198,9 @@ def main():
     with c1: f_norm = st.file_uploader("Movimentação Grupo", accept_multiple_files=True, type=["xml", "zip"])
     with c2: f_canc = st.file_uploader("Canceladas Grupo", accept_multiple_files=True, type=["xml", "zip"])
 
-    if st.button("🚀 Iniciar Auditoria Grupo") and f_norm:
-        if not radical:
-            st.error("Informe um CNPJ para identificar o grupo."); return
+    if st.button("🚀 Iniciar Auditoria") and f_norm:
+        if not radical or rbt12 == 0:
+            st.error("Informe o CNPJ e o RBT12 Acumulado."); return
 
         ch_canc = set()
         for f in f_canc: ch_canc.update(processar_recursivo_generic(f.read(), extrair_chaves_cancelamento))
@@ -215,67 +211,68 @@ def main():
         if regs:
             df = pd.DataFrame(regs)
             df['Cancelada'] = df['Chave'].isin(ch_canc)
-            df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['V_Contabil', 'V_ST', 'Base_DAS']] = Decimal("0")
+            df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), ['Base_DAS']] = Decimal("0")
 
-            st.subheader("📊 Resumo de Continuidade (Somente Base Ativa)")
-            df_cont = df[(df['Categoria'].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])) & (~df['Cancelada'])].copy()
-            if not df_cont.empty:
-                res_series = df_cont.groupby(['Unidade_CNPJ', 'Categoria', 'Modelo', 'Série']).agg(Nota_Ini=('Nota', 'min'), Nota_Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index()
-                st.table(res_series)
-
-            # ─── MOTOR DE CÁLCULO CONSOLIDADO (ÚNICA APURAÇÃO POR ANEXO) ───
+            # ─── MOTOR DE CÁLCULO CONSOLIDADO (PGDAS STYLE) ───
             
-            def obter_aliq_efetiva_anexo(anexo, st_val, rb_total):
+            def obter_aliq_efetiva(anexo, st_val, rb_total):
                 tab = TABELA_ANEXO_I if anexo == "ANEXO I" else TABELA_ANEXO_II
                 faixa = tab[0]
                 for f in tab:
                     if rb_total <= f[2]: faixa = f; break
                     faixa = f
-                _, _, _, a_nom, ded, p_ic = faixa
-                ae = ((rb_total * a_nom) - ded) / rb_total if rb_total > 0 else a_nom
-                af = ae * (Decimal("1.0") - p_ic) if st_val else ae
+                
+                _, _, _, aliq_nom, deducao, p_icms_ipi = faixa
+                # Fórmula Oficial: (RBT12 * AliqNominal - Dedução) / RBT12
+                ae = ((rb_total * aliq_nom) - deducao) / rb_total if rb_total > 0 else aliq_nom
+                
+                # Se for ST, abate o percentual de partilha do ICMS (ou ICMS+IPI na Indústria)
+                if st_val:
+                    af = ae * (Decimal("1.0") - p_icms_ipi)
+                else:
+                    af = ae
                 return af
 
-            # Pré-calcula alíquotas para os 4 cenários possíveis (Anexo I/II com e sem ST)
+            # Pré-calcula alíquotas para o grupo
             aliqs_grupo = {
-                "ANEXO I_False": obter_aliq_efetiva_anexo("ANEXO I", False, rbt12),
-                "ANEXO I_True": obter_aliq_efetiva_anexo("ANEXO I", True, rbt12),
-                "ANEXO II_False": obter_aliq_efetiva_anexo("ANEXO II", False, rbt12),
-                "ANEXO II_True": obter_aliq_efetiva_anexo("ANEXO II", True, rbt12),
+                "ANEXO I_False": obter_aliq_efetiva("ANEXO I", False, rbt12),
+                "ANEXO I_True": obter_aliq_efetiva("ANEXO I", True, rbt12),
+                "ANEXO II_False": obter_aliq_efetiva("ANEXO II", False, rbt12),
+                "ANEXO II_True": obter_aliq_efetiva("ANEXO II", True, rbt12),
             }
 
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             if not df_f.empty:
-                def aplicar_imposto(row):
+                def calcular_das(row):
                     key = f"{row['Anexo']}_{row['ST']}"
                     af = aliqs_grupo[key]
                     mult = Decimal("-1") if row['Categoria'] == "DEVOLUÇÃO VENDA" else Decimal("1")
-                    base_calc = (row['Base_DAS'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
-                    return base_calc, af, (base_calc * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                    base = (row['Base_DAS'] * mult).quantize(Decimal("0.01"), ROUND_HALF_UP)
+                    return af, base, (base * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
 
-                res_fisc = df_f.apply(aplicar_imposto, axis=1, result_type='expand')
-                df_f['Base_F'], df_f['Aliq_F'], df_f['DAS'] = res_fisc[0], res_fisc[1], res_fisc[2]
+                res_fisc = df_f.apply(calcular_das, axis=1, result_type='expand')
+                df_f['Aliq_F'], df_f['Base_F'], df_f['DAS'] = res_fisc[0], res_fisc[1], res_fisc[2]
 
-                st.subheader("📑 Memorial Analítico Unificado (Grupo Econômico)")
-                resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'V_Contabil': 'sum', 'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
+                st.subheader("📊 Resumo de Continuidade (Somente Base PGDAS)")
+                st.table(df_f[~df_f['Cancelada']].groupby(['Unidade_CNPJ', 'Categoria', 'Série']).agg(Nota_Ini=('Nota', 'min'), Nota_Fim=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index())
+
+                st.subheader("📑 Memorial Analítico Consolidado (Grupo)")
+                resumo = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria']).agg({'Base_F': 'sum', 'DAS': 'sum'}).reset_index()
                 resumo['Aliq_Ef'] = df_f.groupby(['Anexo', 'CFOP', 'ST', 'Categoria'])['Aliq_F'].first().values
+                
                 resumo['Aliq (%)'] = resumo['Aliq_Ef'].apply(fmt_aliq)
-                resumo['Contabil'] = resumo['V_Contabil'].apply(fmt_br)
                 resumo['Base PGDAS'] = resumo['Base_F'].apply(fmt_br)
                 resumo['Imposto DAS'] = resumo['DAS'].apply(fmt_br)
-                st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq (%)', 'Contabil', 'Base PGDAS', 'Imposto DAS']])
+                st.table(resumo[['Anexo', 'CFOP', 'ST', 'Categoria', 'Aliq (%)', 'Base PGDAS', 'Imposto DAS']])
 
                 st.markdown("---")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("Faturamento Grupo", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum())}")
+                m1.metric("Bruto Grupo", f"R$ {fmt_br(df_f[df_f['Categoria']=='RECEITA BRUTA']['Base_F'].sum())}")
                 m2.metric("(-) Devoluções Grupo", f"R$ {fmt_br(abs(df_f[df_f['Categoria']=='DEVOLUÇÃO VENDA']['Base_F'].sum()))}")
                 m3.metric("DAS Total a Recolher", f"R$ {fmt_br(df_f['DAS'].sum())}")
             
-            st.subheader("📋 Auditoria Detalhada (Por Unidade)")
-            df_view = df.copy()
-            df_view['V_Contabil'] = df_view['V_Contabil'].apply(fmt_br)
-            df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
-            st.dataframe(df_view[['Unidade_CNPJ', 'Nota', 'CFOP', 'Emitente', 'Destinatário', 'Categoria', 'Tipo', 'V_Contabil', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota encontrada para o radical do grupo.")
+            st.subheader("📋 Auditoria Detalhada")
+            st.dataframe(df[['Unidade_CNPJ', 'Nota', 'CFOP', 'Categoria', 'Base_DAS', 'Cancelada']], use_container_width=True)
+        else: st.error("Nenhuma nota encontrada.")
 
 if __name__ == "__main__": main()
