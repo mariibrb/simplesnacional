@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria Universal Rihanna Mode (VERSÃO INPUT LOCAÇÃO)
-Foco: PGDAS Anexos I, II e III, Entrada Manual de Locação, Espécies 36/42 e Matriosca
+Sentinela Ecosystem - Auditoria Integral Rihanna Mode (VERSÃO CORREÇÃO ANEXO III)
+Foco: Prioridade CFOP sobre Espécie, PGDAS Anexos I, II e III, Matriosca ZIP
 """
 
 import zipfile
@@ -23,7 +23,7 @@ DIRETRIZES_FISCAIS = {
     }
 }
 
-# ─── TABELAS DE PARTILHA E REGRAS PGDAS ────────────────────────────────────
+# ─── TABELAS DE PARTILHA (REGRAS OFICIAIS PGDAS) ───────────────────────────
 PARTILHA_ANEXO_I = {
     1: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
     2: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
@@ -45,6 +45,7 @@ PARTILHA_ANEXO_III = {
 TABELA_ANEXO_I = [(1, 0, 180000, 0.04, 0), (2, 180000.01, 360000, 0.073, 5940), (3, 360000.01, 720000, 0.095, 13860), (4, 720000.01, 1800000, 0.107, 22500), (5, 1800000.01, 3600000, 0.143, 87300), (6, 3600000.01, 4800000, 0.19, 378000)]
 TABELA_ANEXO_III = [(1, 0, 180000, 0.06, 0), (2, 180000.01, 360000, 0.112, 9360), (3, 360000.01, 720000, 0.135, 17640), (4, 720000.01, 1800000, 0.16, 35640), (5, 1800000.01, 3600000, 0.21, 125640), (6, 3600000.01, 4800000, 0.33, 648000)]
 
+# Grupos Rigorosos de CFOP
 CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
 CFOPS_VENDA = {"5101", "5102", "5103", "5105", "5106", "5107", "5108", "5401", "5403", "5405", "6101", "6102", "6401", "6403", "6404"}
 CFOPS_DEVOL = {"1201", "1202", "1411", "2201", "2202", "2411", "5201", "5202", "5411", "6201", "6202", "6411"}
@@ -67,7 +68,8 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
         
         chave = inf.attrib.get('Id', '')[3:]
         emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
-        dest_cnpj = limpar_cnpj(inf.find(f"{ns}dest/{ns}CNPJ").text) if inf.find(f"{ns}dest/{ns}CNPJ") is not None else ""
+        dest_node = inf.find(f"{ns}dest/{ns}CNPJ")
+        dest_cnpj = limpar_cnpj(dest_node.text) if dest_node is not None else ""
         
         ide = inf.find(f"{ns}ide")
         n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
@@ -96,8 +98,9 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
                 if (emit_cnpj.startswith(radical_grupo) and tp_nf == "0") or (dest_cnpj.startswith(radical_grupo) and tp_nf == "1"):
                     categoria = "DEVOLUÇÃO VENDA"
 
-            # Hierarquia baseada na espécie e cfop (conforme seu sistema)
-            if especie == "42" or cfop in CFOPS_SERVICO: anexo = "ANEXO III"
+            # CORREÇÃO CRÍTICA: O CFOP é o mestre do Anexo. 
+            # Espécie 42 só vai para Anexo III se for serviço ou locação manual.
+            if cfop in CFOPS_SERVICO: anexo = "ANEXO III"
             else: anexo = "ANEXO I"
 
             regs.append({
@@ -153,7 +156,7 @@ def main():
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("🛡️ Sentinela Ecosystem - Auditoria de Locação")
+    st.title("🛡️ Sentinela Ecosystem - Auditoria Fiel")
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
@@ -170,9 +173,8 @@ def main():
         st_i = st.checkbox("Anexo I: Possui ST?", value=config["anexo_i"]["st_icms"])
         loc_iii = st.checkbox("Anexo III: Locação?", value=config["anexo_iii"]["locacao"])
         
-        # CAMPO DE INPUT MANUAL PARA LOCAÇÃO
-        st.subheader("💰 Input de Locação")
-        val_loc_raw = st.text_input("Valor Manua de Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
+        st.subheader("💰 Locação Manual")
+        val_loc_raw = st.text_input("Valor de Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
         v_loc_manual = Decimal(val_loc_raw.replace(".", "").replace(",", "."))
         
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
@@ -181,7 +183,7 @@ def main():
     with c1: f_norm = st.file_uploader("Movimentação XML/ZIP", accept_multiple_files=True, key=f"u1_{st.session_state.reset_key}")
     with c2: f_canc = st.file_uploader("Canceladas XML/ZIP", accept_multiple_files=True, key=f"u2_{st.session_state.reset_key}")
 
-    if st.button("🚀 Iniciar Auditoria") and f_norm:
+    if st.button("🚀 Iniciar Processamento") and f_norm:
         if not cnpj_alvo or rbt12 == 0: st.error("Faltam dados essenciais."); return
         
         canc = set()
@@ -215,7 +217,6 @@ def main():
 
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             
-            # Adicionar o Valor Manual de Locação se existir
             if v_loc_manual > 0:
                 loc_row = pd.DataFrame([{
                     "Unidade_CNPJ": cnpj_alvo, "Nota": 0, "Espécie": "MANUAL", "Série": "LOC",
@@ -235,7 +236,7 @@ def main():
                 res = df_f.apply(aplicar, axis=1, result_type='expand')
                 df_f['Aliq_F'], df_f['DAS'] = res[0], res[1]
 
-                st.subheader("📑 Memorial por Espécie (36 / 42 / Manual)")
+                st.subheader("📑 Memorial por Espécie (Hierarquia de CFOP)")
                 for esp in sorted(df_f['Espécie'].unique()):
                     with st.expander(f"📌 Espécie {esp}", expanded=True):
                         df_esp = df_f[df_f['Espécie'] == esp].copy()
