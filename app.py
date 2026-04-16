@@ -1,6 +1,6 @@
 """
-Sentinela Ecosystem - Auditoria de Precisão Máxima (VERSÃO ROSA INTEGRAL)
-Foco: PGDAS Anexos I/III, Continuidade, Input Manual, Espécies 36/42 e Matriosca ZIP
+Sentinela Ecosystem - Auditoria de Elite (VERSÃO CONTINUIDADE FILTRADA)
+Foco: Resumo de Continuidade (Somente Própria), PGDAS I/III, Alíquotas e Matriosca ZIP
 """
 
 import zipfile
@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 import streamlit as st
 import pandas as pd
 
-# Precisão de 60 casas decimais para bater com o PGDAS
+# Precisão de 60 casas para bater com o PGDAS
 getcontext().prec = 60 
 
 # ─── BANCO DE DIRETRIZES FISCAIS (BASE DE DATA) ────────────────────────────
@@ -67,7 +67,7 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
         ide = inf.find(f"{ns}ide")
         n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
         
-        # Espécie 36 (NF-e) e 42 (NFC-e)
+        # Espécie conforme correção anterior: 55=36, 65=42
         especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
 
         for det in inf.findall(f"{ns}det"):
@@ -96,7 +96,8 @@ def extrair_dados_detalhados(conteudo, cnpj_alvo, radical_grupo):
             anexo = "ANEXO III" if cfop in CFOPS_SERVICO else "ANEXO I"
 
             regs.append({
-                "Unidade_CNPJ": emit_cnpj if emit_cnpj.startswith(radical_grupo) else dest_cnpj,
+                "Emitente": emit_cnpj,
+                "Unidade_Auditada": cnpj_alvo,
                 "Nota": n_nota, "Espécie": especie, "Série": serie, "CFOP": cfop, "ST": possui_st, 
                 "Anexo": anexo, "Base_DAS": base_item, "Categoria": categoria, "Chave": chave
             })
@@ -148,10 +149,10 @@ def calcular_aliq_efetiva(anexo, possui_st, rb12, st_i, loc_iii):
     elif anexo == "ANEXO III" and loc_iii: red = p.get('iss', 0)
     return ae_bruta * (Decimal("1") - red)
 
-# ─── INTERFACE STREAMLIT (RESTAURO ROSA) ─────────────────────────────────────
+# ─── INTERFACE STREAMLIT (RESTAURO ROSA INTEGRAL) ───────────────────────────
 
 def main():
-    st.set_page_config(page_title="Sentinela Ecosystem - Auditoria", layout="wide")
+    st.set_page_config(page_title="Sentinela Auditoria", layout="wide")
     st.markdown("""
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
@@ -169,8 +170,8 @@ def main():
     if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
 
     with st.sidebar:
-        st.header("👤 Empresa")
-        cnpj_input = st.text_input("CNPJ Alvo", key=f"c_{st.session_state.reset_key}")
+        st.header("👤 Perfil Empresa")
+        cnpj_input = st.text_input("CNPJ Auditado", key=f"c_{st.session_state.reset_key}")
         cnpj_alvo = limpar_cnpj(cnpj_input); rad = cnpj_alvo[:8] if cnpj_alvo else ""
         rbt12_raw = st.text_input("RBT12 Total", key=f"r_{st.session_state.reset_key}")
         rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
@@ -181,7 +182,7 @@ def main():
         loc_iii = st.checkbox("Anexo III: Locação?", value=config["anexo_iii"]["locacao"])
         
         st.subheader("💰 Locação Manual")
-        val_loc_raw = st.text_input("Valor Manual de Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
+        val_loc_raw = st.text_input("Faturamento Manual Locação (R$)", value="0,00", key=f"loc_{st.session_state.reset_key}")
         v_loc_manual = Decimal(val_loc_raw.replace(".", "").replace(",", "."))
         
         if st.button("🗑️ Resetar Tudo"): st.session_state.reset_key += 1; st.rerun()
@@ -190,10 +191,10 @@ def main():
     with c1: f_norm = st.file_uploader("Movimentação ZIP/XML", accept_multiple_files=True)
     with c2: f_canc = st.file_uploader("Canceladas ZIP/XML", accept_multiple_files=True)
 
-    if st.button("🚀 Iniciar Processamento") and f_norm:
+    if st.button("🚀 Iniciar Auditoria") and f_norm:
         if not cnpj_alvo or rbt12 == 0: st.error("Faltam dados essenciais."); return
         
-        # Cruzamento de Canceladas
+        # Mapeamento de Canceladas
         canc = set()
         for f in f_canc:
             res_c = processar_recursivo(f.read(), extrair_canceladas)
@@ -209,22 +210,24 @@ def main():
             df['Cancelada'] = df['Chave'].isin(canc)
             df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
 
-            # 📊 RESUMO DE CONTINUIDADE (RESTAURADO)
-            st.subheader("📊 Resumo de Continuidade")
-            df_cont = df[~df['Cancelada']].copy()
-            if not df_cont.empty:
-                res_cont = df_cont.groupby(['Unidade_CNPJ', 'Série']).agg(
+            # ─── 📊 RESUMO DE CONTINUIDADE (SOMENTE EMISSÕES PRÓPRIAS) ───
+            st.subheader("📊 Resumo de Continuidade (Emissão Própria)")
+            # Filtro rigoroso: Somente notas onde o Emitente é o CNPJ alvo
+            df_propria = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada'])].copy()
+            if not df_propria.empty:
+                res_cont = df_propria.groupby(['Emitente', 'Série']).agg(
                     Primeira_Nota=('Nota', 'min'),
                     Ultima_Nota=('Nota', 'max'),
                     Qtd_Lida=('Nota', 'nunique')
                 ).reset_index()
                 st.table(res_cont)
+            else:
+                st.info("Nenhuma emissão própria válida encontrada para o resumo de continuidade.")
 
             df_f = df[df["Categoria"].isin(["RECEITA BRUTA", "DEVOLUÇÃO VENDA"])].copy()
             
-            # Adicionar Locação Manual
             if v_loc_manual > 0:
-                loc_row = pd.DataFrame([{"Unidade_CNPJ": cnpj_alvo, "Nota": 0, "Espécie": "MANUAL", "Série": "LOC", "CFOP": "LOC", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_loc_manual, "Categoria": "RECEITA BRUTA", "Cancelada": False, "Chave": "MANUAL_LOC"}])
+                loc_row = pd.DataFrame([{"Emitente": cnpj_alvo, "Nota": 0, "Espécie": "MANUAL", "Série": "LOC", "CFOP": "LOC", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_loc_manual, "Categoria": "RECEITA BRUTA", "Cancelada": False, "Chave": "MANUAL_LOC"}])
                 df_f = pd.concat([df_f, loc_row], ignore_index=True)
 
             if not df_f.empty:
@@ -258,7 +261,7 @@ def main():
 
             st.subheader("📋 Auditoria Detalhada")
             df_view = df.copy(); df_view['Base_DAS'] = df_view['Base_DAS'].apply(fmt_br)
-            st.dataframe(df_view[['Unidade_CNPJ', 'Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Base_DAS', 'Cancelada']], use_container_width=True)
-        else: st.error("Nenhuma nota lida.")
+            st.dataframe(df_view[['Emitente', 'Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Base_DAS', 'Cancelada']], use_container_width=True)
+        else: st.error("Nenhuma nota processada.")
 
 if __name__ == "__main__": main()
