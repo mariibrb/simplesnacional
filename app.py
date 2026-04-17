@@ -1,258 +1,1801 @@
 """
-Auditoria Fiscal de Alta Precisão (VERSÃO BLINDADA CONTRA KEYERROR)
-Foco: Fidelidade Absoluta, Estabilidade de Colunas, Continuidade 55/65 e Partilha Detalhada
+Apuração do Simples Nacional — ficheiro único para deploy (só `app.py` + `requirements.txt`).
 """
-
+from __future__ import annotations
+import json
+import os
+import subprocess
+import webbrowser
 import zipfile
 import io
 import re
-from xml.etree import ElementTree as ET
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP, getcontext
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, NamedTuple
+
 import streamlit as st
 import pandas as pd
 
-# Precisão absoluta para bater com as 13 casas decimais do PGDAS
-getcontext().prec = 60 
+# ── Motor: tabelas ──────────────────────────────────────────────────────────
+class Faixa(NamedTuple):
+    num: int
+    lim_inf: Decimal
+    lim_sup: Decimal
+    aliq_nom: Decimal
+    deducao: Decimal
 
-# ─── TABELAS DE PARTILHA DETALHADA (PERCENTUAIS POR TRIBUTO) ───────────────
-PARTILHA_ANEXO_I = {
-    1: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
-    2: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.415"), 'icms': Decimal("0.34")},
-    3: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.42"), 'icms': Decimal("0.335")},
-    4: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.42"), 'icms': Decimal("0.335")},
-    5: {'irpj': Decimal("0.055"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1274"), 'pis': Decimal("0.0276"), 'cpp': Decimal("0.42"), 'icms': Decimal("0.335")},
+def _d(s): return Decimal(str(s))
+
+# ── Tabelas nominais ──────────────────────────────────────────────────────────
+TABELAS: Dict[str, List[Faixa]] = {
+    "I": [
+        Faixa(1, _d("0"),          _d("180000"),  _d("0.04"),  _d("0")),
+        Faixa(2, _d("180000.01"),  _d("360000"),  _d("0.073"), _d("5940")),
+        Faixa(3, _d("360000.01"),  _d("720000"),  _d("0.095"), _d("13860")),
+        Faixa(4, _d("720000.01"),  _d("1800000"), _d("0.107"), _d("22500")),
+        Faixa(5, _d("1800000.01"),_d("3600000"),  _d("0.143"), _d("87300")),
+        Faixa(6, _d("3600000.01"),_d("4800000"),  _d("0.19"),  _d("378000")),
+    ],
+    "II": [
+        Faixa(1, _d("0"),          _d("180000"),  _d("0.045"), _d("0")),
+        Faixa(2, _d("180000.01"),  _d("360000"),  _d("0.078"), _d("5940")),
+        Faixa(3, _d("360000.01"),  _d("720000"),  _d("0.10"),  _d("13860")),
+        Faixa(4, _d("720000.01"),  _d("1800000"), _d("0.112"), _d("22500")),
+        Faixa(5, _d("1800000.01"),_d("3600000"),  _d("0.147"), _d("85500")),
+        Faixa(6, _d("3600000.01"),_d("4800000"),  _d("0.30"),  _d("720000")),
+    ],
+    "III": [
+        Faixa(1, _d("0"),          _d("180000"),  _d("0.06"),  _d("0")),
+        Faixa(2, _d("180000.01"),  _d("360000"),  _d("0.112"), _d("9360")),
+        Faixa(3, _d("360000.01"),  _d("720000"),  _d("0.135"), _d("17640")),
+        Faixa(4, _d("720000.01"),  _d("1800000"), _d("0.16"),  _d("35640")),
+        Faixa(5, _d("1800000.01"),_d("3600000"),  _d("0.21"),  _d("125640")),
+        Faixa(6, _d("3600000.01"),_d("4800000"),  _d("0.33"),  _d("648000")),
+    ],
+    "IV": [
+        Faixa(1, _d("0"),          _d("180000"),  _d("0.045"), _d("0")),
+        Faixa(2, _d("180000.01"),  _d("360000"),  _d("0.09"),  _d("8100")),
+        Faixa(3, _d("360000.01"),  _d("720000"),  _d("0.102"), _d("12420")),
+        Faixa(4, _d("720000.01"),  _d("1800000"), _d("0.14"),  _d("39780")),
+        Faixa(5, _d("1800000.01"),_d("3600000"),  _d("0.22"),  _d("183780")),
+        Faixa(6, _d("3600000.01"),_d("4800000"),  _d("0.33"),  _d("828000")),
+    ],
+    "V": [
+        Faixa(1, _d("0"),          _d("180000"),  _d("0.155"), _d("0")),
+        Faixa(2, _d("180000.01"),  _d("360000"),  _d("0.18"),  _d("4500")),
+        Faixa(3, _d("360000.01"),  _d("720000"),  _d("0.195"), _d("9900")),
+        Faixa(4, _d("720000.01"),  _d("1800000"), _d("0.205"), _d("17100")),
+        Faixa(5, _d("1800000.01"),_d("3600000"),  _d("0.23"),  _d("62100")),
+        Faixa(6, _d("3600000.01"),_d("4800000"),  _d("0.305"), _d("540000")),
+    ],
 }
 
-PARTILHA_ANEXO_III = {
-    1: {'irpj': Decimal("0.04"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1405"), 'pis': Decimal("0.0305"), 'cpp': Decimal("0.434"), 'iss': Decimal("0.32")},
-    2: {'irpj': Decimal("0.04"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1405"), 'pis': Decimal("0.0305"), 'cpp': Decimal("0.434"), 'iss': Decimal("0.32")},
-    3: {'irpj': Decimal("0.04"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1405"), 'pis': Decimal("0.0305"), 'cpp': Decimal("0.434"), 'iss': Decimal("0.325")},
-    4: {'irpj': Decimal("0.04"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1405"), 'pis': Decimal("0.0305"), 'cpp': Decimal("0.434"), 'iss': Decimal("0.325")},
-    5: {'irpj': Decimal("0.04"), 'csll': Decimal("0.035"), 'cofins': Decimal("0.1405"), 'pis': Decimal("0.0305"), 'cpp': Decimal("0.434"), 'iss': Decimal("0.335")},
+# ── Partilha por tributo (% sobre o DAS total) ────────────────────────────────
+PARTILHAS: Dict[str, Dict[int, Dict[str, Decimal]]] = {
+    "I": {
+        1: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1274"),"PIS":_d("0.0276"),"CPP":_d("0.415"), "ICMS":_d("0.34")},
+        2: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1274"),"PIS":_d("0.0276"),"CPP":_d("0.415"), "ICMS":_d("0.34")},
+        3: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1274"),"PIS":_d("0.0276"),"CPP":_d("0.42"),  "ICMS":_d("0.335")},
+        4: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1274"),"PIS":_d("0.0276"),"CPP":_d("0.42"),  "ICMS":_d("0.335")},
+        5: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1274"),"PIS":_d("0.0276"),"CPP":_d("0.42"),  "ICMS":_d("0.335")},
+        6: {"IRPJ":_d("0.135"),"CSLL":_d("0.10"), "COFINS":_d("0.2827"),"PIS":_d("0.0613"),"CPP":_d("0.421"),"ICMS":_d("0")},
+    },
+    "II": {
+        1: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1151"),"PIS":_d("0.0249"),"CPP":_d("0.375"),"IPI":_d("0.075"),"ICMS":_d("0.32")},
+        2: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1151"),"PIS":_d("0.0249"),"CPP":_d("0.375"),"IPI":_d("0.075"),"ICMS":_d("0.32")},
+        3: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1151"),"PIS":_d("0.0249"),"CPP":_d("0.375"),"IPI":_d("0.075"),"ICMS":_d("0.32")},
+        4: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1151"),"PIS":_d("0.0249"),"CPP":_d("0.375"),"IPI":_d("0.075"),"ICMS":_d("0.32")},
+        5: {"IRPJ":_d("0.055"),"CSLL":_d("0.035"),"COFINS":_d("0.1151"),"PIS":_d("0.0249"),"CPP":_d("0.375"),"IPI":_d("0.075"),"ICMS":_d("0.32")},
+        6: {"IRPJ":_d("0.085"),"CSLL":_d("0.075"),"COFINS":_d("0.2096"),"PIS":_d("0.0454"),"CPP":_d("0.235"),"IPI":_d("0.35"), "ICMS":_d("0")},
+    },
+    "III": {
+        1: {"IRPJ":_d("0.04"),"CSLL":_d("0.035"),"COFINS":_d("0.1405"),"PIS":_d("0.0305"),"CPP":_d("0.434"),"ISS":_d("0.32")},
+        2: {"IRPJ":_d("0.04"),"CSLL":_d("0.035"),"COFINS":_d("0.1405"),"PIS":_d("0.0305"),"CPP":_d("0.434"),"ISS":_d("0.32")},
+        3: {"IRPJ":_d("0.04"),"CSLL":_d("0.035"),"COFINS":_d("0.1405"),"PIS":_d("0.0305"),"CPP":_d("0.434"),"ISS":_d("0.325")},
+        4: {"IRPJ":_d("0.04"),"CSLL":_d("0.035"),"COFINS":_d("0.1405"),"PIS":_d("0.0305"),"CPP":_d("0.434"),"ISS":_d("0.325")},
+        5: {"IRPJ":_d("0.04"),"CSLL":_d("0.035"),"COFINS":_d("0.1405"),"PIS":_d("0.0305"),"CPP":_d("0.434"),"ISS":_d("0.335")},
+        6: {"IRPJ":_d("0.35"), "CSLL":_d("0.15"),"COFINS":_d("0.1405"),"PIS":_d("0.0305"),"CPP":_d("0"),    "ISS":_d("0.335")},
+    },
+    "IV": {
+        1: {"IRPJ":_d("0.18"), "CSLL":_d("0.15"),"COFINS":_d("0.425"), "PIS":_d("0.0925"),"ISS":_d("0.1525")},
+        2: {"IRPJ":_d("0.18"), "CSLL":_d("0.15"),"COFINS":_d("0.425"), "PIS":_d("0.0925"),"ISS":_d("0.1525")},
+        3: {"IRPJ":_d("0.185"),"CSLL":_d("0.15"),"COFINS":_d("0.4375"),"PIS":_d("0.095"), "ISS":_d("0.1325")},
+        4: {"IRPJ":_d("0.185"),"CSLL":_d("0.15"),"COFINS":_d("0.4375"),"PIS":_d("0.095"), "ISS":_d("0.1325")},
+        5: {"IRPJ":_d("0.185"),"CSLL":_d("0.15"),"COFINS":_d("0.4375"),"PIS":_d("0.095"), "ISS":_d("0.1325")},
+        6: {"IRPJ":_d("0.35"), "CSLL":_d("0.15"),"COFINS":_d("0.4375"),"PIS":_d("0.095"), "ISS":_d("0")},
+    },
+    "V": {
+        1: {"IRPJ":_d("0.25"),"CSLL":_d("0.15"),"COFINS":_d("0.1425"),"PIS":_d("0.0309"),"CPP":_d("0.28"), "ISS":_d("0.14")},
+        2: {"IRPJ":_d("0.23"),"CSLL":_d("0.15"),"COFINS":_d("0.1425"),"PIS":_d("0.0309"),"CPP":_d("0.28"), "ISS":_d("0.17")},
+        3: {"IRPJ":_d("0.24"),"CSLL":_d("0.15"),"COFINS":_d("0.1425"),"PIS":_d("0.0309"),"CPP":_d("0.28"), "ISS":_d("0.18")},
+        4: {"IRPJ":_d("0.21"),"CSLL":_d("0.15"),"COFINS":_d("0.1425"),"PIS":_d("0.0309"),"CPP":_d("0.28"), "ISS":_d("0.21")},
+        5: {"IRPJ":_d("0.23"),"CSLL":_d("0.15"),"COFINS":_d("0.1425"),"PIS":_d("0.0309"),"CPP":_d("0.28"), "ISS":_d("0.23")},
+        6: {"IRPJ":_d("0.35"),"CSLL":_d("0.15"),"COFINS":_d("0.1425"),"PIS":_d("0.0309"),"CPP":_d("0"),    "ISS":_d("0.335")},
+    },
 }
 
-TABELA_ANEXO_I = [(1, 0, 180000, 0.04, 0), (2, 180000.01, 360000, 0.073, 5940), (3, 360000.01, 720000, 0.095, 13860), (4, 720000.01, 1800000, 0.107, 22500), (5, 1800000.01, 3600000, 0.143, 87300)]
-TABELA_ANEXO_III = [(1, 0, 180000, 0.06, 0), (2, 180000.01, 360000, 0.112, 9360), (3, 360000.01, 720000, 0.135, 17640), (4, 720000.01, 1800000, 0.16, 35640), (5, 1800000.01, 3600000, 0.21, 125640)]
+# CFOPs de saída que compõem receita bruta
+CFOPS_RECEITA_BRUTA = {
+    "5101","6101","5102","6102","5103","6103","5104","6104",
+    "5105","6105","5106","6106","5109","6109","5110","6110",
+    "5111","6111","5112","6112","5113","6113","5114","6114",
+    "5115","6115","5116","6116","5117","6117","5118","6118",
+    "5119","6119","5120","6120","5122","6122","5123","6123",
+    "5124","6124","5125","6125","5126","6126","5127","6127",
+    "5128","6128","5401","6401","5402","6402","5403","6403",
+    "5404","6404","5405","6405","5501","6501",
+    "5933","6933","5949","6949",
+}
 
-CFOPS_SERVICO = {"5933", "6933", "5124", "6124"}
+# CFOPs de saída que NÃO são receita (transferência, imobilizado, bonificação)
+CFOPS_NAO_RECEITA = {
+    "5351","6351","5352","6352","5353","6353","5354","6354",
+    "5355","6355","5356","6356","5357","6357","5358","6358",
+    "5551","6551","5552","6552","5553","6553","5554","6554",
+    "5555","6555","5556","6556","5557","6557","5910","5911",
+    "5912","5913","5914","5915","5916","5917","5918","5919",
+    "5920","5921","5922","5923","5924","5925",
+}
 
-# ─── FUNÇÕES DE SUPORTE ──────────────────────────────────────────────────────
+# CFOPs de devolução (entrada que estorna venda anterior)
+CFOPS_DEVOLUCAO = {
+    "1201","2201","1202","2202","1203","2203","1204","2204",
+    "1410","2410","1411","2411","1503","2503",
+}
 
-def fmt_br(v): return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-def fmt_aliq(v): return f"{(v * 100):,.13f}".replace(".", ",") + "%"
-def limpar_cnpj(c): return re.sub(r'\D', '', str(c))
+# CFOPs que indicam serviço dentro de NF-e
+CFOPS_SERVICO = {
+    "5933","6933","5124","6124","5125","6125",
+}
 
-# ─── MOTOR DE EXTRAÇÃO FIEL (vNF INTEGRAL) ──────────────────────────────────
+# CST/CSOSN que indicam ST
+CSOSN_ST = {"201","202","203","500","700","900"}
+CST_ST   = {"10","30","60","70"}
 
-def extrair_dados_detalhados(conteudo, cnpj_alvo):
-    regs = []
+LIMITE_SIMPLES = _d("4800000")
+FATOR_R_MIN    = _d("0.28")
+TRIBUTOS_ORDEM = ["IRPJ","CSLL","COFINS","PIS","CPP","IPI","ICMS","ISS"]
+
+ANEXOS_DESC = {
+    "I":   "Anexo I — Comércio",
+    "II":  "Anexo II — Indústria",
+    "III": "Anexo III — Serviços / Locação",
+    "IV":  "Anexo IV — Serviços específicos (CPP fora do DAS)",
+    "V":   "Anexo V — Serviços com Fator R",
+}
+
+def get_faixa(anexo: str, rbt12: Decimal) -> Faixa:
+    for f in TABELAS[anexo]:
+        if rbt12 <= f.lim_sup:
+            return f
+    return TABELAS[anexo][-1]
+
+def get_partilha(anexo: str, num_faixa: int) -> Dict[str, Decimal]:
+    return dict(PARTILHAS[anexo][num_faixa])
+
+# ── Motor: leitor XML ───────────────────────────────────────────────────────
+import zipfile, io, re
+from xml.etree import ElementTree as ET
+
+NS_NFE = "http://www.portalfiscal.inf.br/nfe"
+NS_CTE = "http://www.portalfiscal.inf.br/cte"
+
+# ── Estrutura de nota normalizada ─────────────────────────────────────────────
+@dataclass
+class ItemNota:
+    cfop: str
+    valor: Decimal
+    tem_st: bool
+    tipo: str  # "mercadoria" | "servico" | "frete"
+
+@dataclass
+class NotaFiscal:
+    chave: str
+    modelo: str           # "55","65","57","NFSe","CANC"
+    cnpj_emitente: str
+    cnpj_destinatario: str
+    tipo_op: str          # "0"=entrada "1"=saída
+    valor_total: Decimal
+    itens: List[ItemNota]
+    cancelada: bool = False
+    is_devolucao: bool = False
+    is_transferencia: bool = False
+    is_frete_cte: bool = False
+    alertas: List[str] = field(default_factory=list)
+    # Explicação de cada decisão — para mostrar ao usuário
+    decisoes: List[str] = field(default_factory=list)
+
+    @property
+    def valor_receita(self) -> Decimal:
+        """Valor que entra na receita bruta (exclui frete CTE e transferências)."""
+        if self.cancelada or self.is_frete_cte or self.is_transferencia:
+            return Decimal("0")
+        sinal = Decimal("-1") if self.is_devolucao else Decimal("1")
+        return sinal * self.valor_total
+
+    @property
+    def tem_st(self) -> bool:
+        return any(i.tem_st for i in self.itens)
+
+    @property
+    def cfops(self) -> List[str]:
+        return [i.cfop for i in self.itens]
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _limpar(s: str) -> str:
+    return re.sub(r"\D", "", str(s or ""))
+
+def _dec(s) -> Decimal:
     try:
-        conteudo_str = conteudo.decode('utf-8', errors='ignore').lstrip()
-        
-        # 1. NFSe (Municipal)
-        if "<nfse" in conteudo_str.lower() or "<compnfse" in conteudo_str.lower():
-            root = ET.fromstring(conteudo_str)
-            ns_nfse = "{http://www.abrasf.org.br/nfse.xsd}"
-            try:
-                n_nota = root.find(f".//{ns_nfse}Numero").text
-                v_serv = Decimal(root.find(f".//{ns_nfse}ValorServicos").text)
-                emit_cnpj = limpar_cnpj(root.find(f".//{ns_nfse}Cnpj").text)
-                regs.append({
-                    "Emitente": emit_cnpj, "Nota": int(n_nota), "Série": "SRV", "Espécie": "NFSe", 
-                    "CFOP": "SERV", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_serv, 
-                    "Categoria": "RECEITA BRUTA", "Chave": n_nota
-                })
-            except: pass
-            return regs
-
-        # 2. NFe (55) / NFCe (65)
-        root = ET.fromstring(conteudo_str)
-        ns = "{http://www.portalfiscal.inf.br/nfe}"
-        inf = root.find(f".//{ns}infNFe")
-        if inf is None: return []
-        
-        chave = inf.attrib.get('Id', '')[3:]
-        emit_cnpj = limpar_cnpj(inf.find(f"{ns}emit/{ns}CNPJ").text)
-        ide = inf.find(f"{ns}ide")
-        n_nota, serie, mod_xml, tp_nf = int(ide.find(f"{ns}nNF").text), ide.find(f"{ns}serie").text, ide.find(f"{ns}mod").text, ide.find(f"{ns}tpNF").text
-        especie = "36" if mod_xml == "55" else "42" if mod_xml == "65" else mod_xml
-
-        det_primeiro = inf.find(f"{ns}det")
-        cfop = det_primeiro.find(f"{ns}prod/{ns}CFOP").text.replace(".", "") if det_primeiro is not None else "0000"
-        
-        icms_node = det_primeiro.find(f"{ns}imposto/{ns}ICMS") if det_primeiro is not None else None
-        possui_st = False
-        if icms_node is not None:
-            # Varre CSOSN ou CST
-            tags = [icms_node.find(f".//{ns}CSOSN"), icms_node.find(f".//{ns}CST")]
-            for t in tags:
-                if t is not None and t.text in ["201", "202", "203", "500", "10", "60", "70"]:
-                    possui_st = True
-
-        v_total_nota = Decimal(inf.find(f"{ns}total/{ns}ICMSTot/{ns}vNF").text)
-        
-        categoria = "RECEITA BRUTA" if emit_cnpj == cnpj_alvo and tp_nf == "1" else "OUTROS"
-        anexo = "ANEXO III" if cfop in CFOPS_SERVICO else "ANEXO I"
-
-        regs.append({
-            "Emitente": emit_cnpj, "Nota": n_nota, "Série": serie, "Espécie": especie, 
-            "CFOP": cfop, "ST": possui_st, "Anexo": anexo, "Base_DAS": v_total_nota, 
-            "Categoria": categoria, "Chave": chave
-        })
-    except: pass
-    return regs
-
-def extrair_canceladas(conteudo):
-    ch_canc = set()
-    try:
-        root = ET.fromstring(conteudo.decode('utf-8', errors='ignore').lstrip()); ns = "{http://www.portalfiscal.inf.br/nfe}"
-        for ev in root.findall(f".//{ns}infEvento"):
-            if ev.find(f"{ns}tpEvento").text == "110111": ch_canc.add(ev.find(f"{ns}chNFe").text)
-        inf = root.find(f".//{ns}infNFe")
-        if inf is not None: ch_canc.add(inf.attrib.get('Id', '')[3:])
-    except: pass
-    return ch_canc
-
-def processar_recursivo(arquivo_bytes, func, **kwargs):
-    results = []
-    try:
-        with zipfile.ZipFile(io.BytesIO(arquivo_bytes)) as z:
-            for n in z.namelist():
-                c = z.read(n)
-                if n.lower().endswith('.zip'): results.extend(processar_recursivo(c, func, **kwargs))
-                elif n.lower().endswith('.xml'):
-                    res = func(c, **kwargs)
-                    if isinstance(res, list): results.extend(res)
-                    else: results.append(res)
+        return Decimal(str(s).strip())
     except:
-        res = func(arquivo_bytes, **kwargs)
-        if isinstance(res, list): results.extend(res)
-        elif isinstance(res, set): results.append(res)
-        else: results.append(res)
-    return results
+        return Decimal("0")
 
-# ─── MOTOR DE CÁLCULO PGDAS ──────────────────────────────────────────────────
+def _t(root: ET.Element, *tags, ns: str = "") -> str:
+    for tag in tags:
+        path = f".//{{{ns}}}{tag}" if ns else f".//{tag}"
+        el = root.find(path)
+        if el is not None and el.text:
+            return el.text.strip()
+    return ""
 
-def calcular_aliq_efetiva_detalhada(anexo, possui_st, rb12, st_i):
-    tab, partilha_map = (TABELA_ANEXO_I, PARTILHA_ANEXO_I) if anexo == "ANEXO I" else (TABELA_ANEXO_III, PARTILHA_ANEXO_III)
-    faixa = tab[0]; f_idx = 1
-    for f in tab:
-        if rb12 <= f[2]: faixa = f; f_idx = f[0]; break
-        faixa = f; f_idx = f[0]
-    
-    ae_bruta = ((rb12 * Decimal(str(faixa[3]))) - Decimal(str(faixa[4]))) / rb12
-    red = Decimal("0")
-    if anexo == "ANEXO I" and st_i and possui_st: 
-        red = partilha_map[f_idx].get('icms', 0)
-    
-    return ae_bruta * (Decimal("1") - red)
+# ── Parser NF-e / NFC-e ───────────────────────────────────────────────────────
+def _parse_nfe(conteudo: bytes) -> Optional[NotaFiscal]:
+    try:
+        root = ET.fromstring(conteudo.decode("utf-8", errors="ignore").lstrip())
+        ns   = NS_NFE
+        inf  = root.find(f".//{{{ns}}}infNFe")
+        if inf is None: return None
 
-# ─── INTERFACE STREAMLIT ────────────────────────────────────────────────────
+        ide    = inf.find(f"{{{ns}}}ide")
+        modelo = _t(ide, "mod", ns=ns)
+        if modelo not in ("55","65"): return None
 
-def main():
-    if 'reset_key' not in st.session_state: st.session_state.reset_key = 0
-    
-    st.set_page_config(page_title="Auditoria de Precisão", layout="wide")
-    st.markdown(f"""
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600;800&display=swap');
-            html, body, [class*="css"] {{ font-family: 'Montserrat', sans-serif; }}
-            .stApp {{ background: radial-gradient(circle at top center, #ffe6f0 0%, #ffb3d1 100%); color: #4a0024; }}
-            h1, h2, h3, h4 {{ color: #d81b60 !important; font-weight: 800; }}
-            .stMetric {{ background-color: rgba(255, 255, 255, 0.7); padding: 15px; border-radius: 10px; border-left: 5px solid #d81b60; }}
-            .stButton>button {{ background-color: #d81b60; color: white; border-radius: 20px; font-weight: 600; width: 100%; }}
-            .stTable {{ background-color: rgba(255, 255, 255, 0.4); border-radius: 10px; }}
-        </style>
-    """, unsafe_allow_html=True)
+        chave   = inf.attrib.get("Id","")[3:]
+        tp_nf   = _t(ide, "tpNF", ns=ns)   # 0=entrada 1=saída
+        emit    = _limpar(_t(inf, "emit/{%s}CNPJ" % ns) or _t(inf, "CNPJ", ns=ns))
+        dest_el = inf.find(f"{{{ns}}}dest")
+        dest    = ""
+        if dest_el is not None:
+            dest = _limpar(_t(dest_el,"CNPJ",ns=ns) or _t(dest_el,"CPF",ns=ns))
 
-    st.title("🛡️ Auditoria Fiscal de Alta Precisão")
+        v_total = _dec(_t(inf, "vNF", ns=ns) or _t(root,"vNF",ns=ns))
+        decisoes: List[str] = []
+        alertas:  List[str] = []
+        itens:    List[ItemNota] = []
 
-    with st.sidebar:
-        st.header("👤 Perfil da Empresa")
-        cnpj_input = st.text_input("CNPJ", key=f"cnpj_{st.session_state.reset_key}")
-        cnpj_alvo = limpar_cnpj(cnpj_input)
-        rbt12_raw = st.text_input("RBT12", key=f"rbt12_{st.session_state.reset_key}")
-        rbt12 = Decimal(rbt12_raw.replace(".", "").replace(",", ".")) if rbt12_raw else Decimal("0")
-        
-        st.header("🧱 Regras")
-        st_i = st.checkbox("Anexo I: Possui ST?", value=True, key=f"st_{st.session_state.reset_key}")
-        
-        st.subheader("💰 Lançamentos Manuais")
-        val_loc_raw = st.text_input("Locação Manual", value="0,00", key=f"loc_{st.session_state.reset_key}")
-        v_loc_manual = Decimal(val_loc_raw.replace(".", "").replace(",", "."))
-        
-        if st.button("🗑️ Resetar Tudo"):
-            st.session_state.reset_key += 1
-            st.rerun()
+        is_dev = False
+        is_transf = False
 
-    c1, c2 = st.columns(2)
-    with c1: f_norm = st.file_uploader("Notas", accept_multiple_files=True, key=f"f1_{st.session_state.reset_key}")
-    with c2: f_canc = st.file_uploader("Cancelamentos", accept_multiple_files=True, key=f"f2_{st.session_state.reset_key}")
+        for det in inf.findall(f"{{{ns}}}det"):
+            prod = det.find(f"{{{ns}}}prod")
+            if prod is None: continue
+            cfop  = _t(prod,"CFOP",ns=ns).replace(".","")
+            vProd = _dec(_t(prod,"vProd",ns=ns))
 
-    if st.button("🚀 Iniciar Processamento") and f_norm:
-        if not cnpj_alvo or rbt12 == 0: st.error("Preencha CNPJ e RBT12."); return
-        
-        canc = set()
-        for f in f_canc:
-            res_c = processar_recursivo(f.read(), extrair_canceladas)
-            for item in res_c:
-                if isinstance(item, set): canc.update(item)
-                else: canc.add(item)
-        
-        regs_raw = []
-        for f in f_norm: regs_raw.extend(processar_recursivo(f.read(), extrair_dados_detalhados, cnpj_alvo=cnpj_alvo))
-        
-        if regs_raw:
-            df = pd.DataFrame(regs_raw).drop_duplicates(subset=['Chave'])
-            df['Cancelada'] = df['Chave'].isin(canc)
-            df.loc[df['Cancelada'] | (df['Categoria'] == "OUTROS"), 'Base_DAS'] = Decimal("0")
+            # ST por item
+            icms_node = det.find(f".//{{{ns}}}ICMS")
+            item_st = False
+            if icms_node is not None:
+                csosn = _t(icms_node,"CSOSN",ns=ns)
+                cst   = _t(icms_node,"CST",  ns=ns)
+                if csosn in CSOSN_ST or cst in CST_ST:
+                    item_st = True
 
-            st.subheader("📊 Resumo de Continuidade")
-            df_propria = df[(df['Emitente'] == cnpj_alvo) & (~df['Cancelada']) & (df['Espécie'].isin(["36", "42"]))].copy()
-            if not df_propria.empty:
-                res_cont = df_propria.groupby(['Espécie', 'Série']).agg(Inicial=('Nota', 'min'), Final=('Nota', 'max'), Qtd=('Nota', 'nunique')).reset_index()
-                st.table(res_cont)
+            # Tipo do item
+            if cfop in CFOPS_SERVICO:
+                tipo = "servico"
+            elif cfop in {"5352","6352","5351","6351","5353","6353"}:
+                tipo = "transferencia"
+                is_transf = True
+            else:
+                tipo = "mercadoria"
 
-            df_f = df[(df["Categoria"] == "RECEITA BRUTA") & (~df['Cancelada']) & (df['Base_DAS'] != 0)].copy()
-            if v_loc_manual > 0:
-                loc_row = pd.DataFrame([{"Emitente": cnpj_alvo, "Nota": 0, "Espécie": "LOCAÇÃO", "Série": "MANUAL", "CFOP": "LOC", "ST": False, "Anexo": "ANEXO III", "Base_DAS": v_loc_manual, "Categoria": "RECEITA BRUTA", "Cancelada": False, "Chave": "M_LOC"}])
-                df_f = pd.concat([df_f, loc_row], ignore_index=True)
+            # Devolução
+            if cfop in CFOPS_DEVOLUCAO:
+                is_dev = True
 
-            if not df_f.empty:
-                def calc_row(row):
-                    af = calcular_aliq_efetiva_detalhada(row['Anexo'], row['ST'], rbt12, st_i)
-                    das = (row['Base_DAS'] * af).quantize(Decimal("0.01"), ROUND_HALF_UP)
-                    return af, das
+            itens.append(ItemNota(cfop=cfop, valor=vProd, tem_st=item_st, tipo=tipo))
 
-                res_f = df_f.apply(calc_row, axis=1, result_type='expand')
-                df_f['Aliq_Final'], df_f['DAS_Valor'] = res_f[0], res_f[1]
+        # Decisões explicadas
+        if tp_nf == "0":
+            decisoes.append("Nota de ENTRADA — não entra na receita bruta como venda.")
+        if is_dev:
+            decisoes.append("CFOP de devolução identificado — valor será SUBTRAÍDO da receita do mês.")
+        if is_transf:
+            decisoes.append("CFOP de transferência entre estabelecimentos — NÃO entra na receita bruta.")
+        if any(i.tem_st for i in itens):
+            decisoes.append("Itens com ST detectados (CSOSN 201/202/203/500) — parcela ICMS será removida da alíquota.")
 
-                st.subheader("📑 Memorial Analítico")
-                for esp in sorted(df_f['Espécie'].unique()):
-                    with st.expander(f"📌 Espécie {esp}", expanded=True):
-                        df_esp = df_f[df_f['Espécie'] == esp].copy()
-                        
-                        # --- AJUSTE DE BLINDAGEM KEYERROR ---
-                        # Agrupamos apenas pelas colunas que temos certeza que existem
-                        cols_group = [c for c in ['Anexo', 'CFOP', 'ST'] if c in df_esp.columns]
-                        resumo = df_esp.groupby(cols_group).agg({'Base_DAS': 'sum', 'DAS_Valor': 'sum'}).reset_index()
-                        
-                        # Calculamos alíquota e formatamos para exibição
-                        resumo['Aliq (%)'] = resumo.apply(lambda r: calcular_aliq_efetiva_detalhada(r['Anexo'], r.get('ST', False), rbt12, st_i), axis=1).apply(fmt_aliq)
-                        resumo['Faturamento'] = resumo['Base_DAS'].apply(fmt_br)
-                        resumo['DAS'] = resumo['DAS_Valor'].apply(fmt_br)
-                        
-                        # Exibimos apenas as colunas formatadas para a tabela final
-                        cols_view = [c for c in ['Anexo', 'CFOP', 'ST', 'Aliq (%)', 'Faturamento', 'DAS'] if c in resumo.columns]
-                        st.table(resumo[cols_view])
+        return NotaFiscal(
+            chave=chave, modelo=modelo,
+            cnpj_emitente=emit, cnpj_destinatario=dest,
+            tipo_op=tp_nf, valor_total=v_total, itens=itens,
+            is_devolucao=is_dev, is_transferencia=is_transf,
+            decisoes=decisoes, alertas=alertas,
+        )
+    except Exception as e:
+        return None
 
-                m1, m2 = st.columns(2)
-                m1.metric("Faturamento Líquido", f"R$ {fmt_br(df_f['Base_DAS'].sum())}")
-                m2.metric("Total Simples", f"R$ {fmt_br(df_f['DAS_Valor'].sum())}")
+# ── Parser CT-e ───────────────────────────────────────────────────────────────
+def _parse_cte(conteudo: bytes) -> Optional[NotaFiscal]:
+    try:
+        root = ET.fromstring(conteudo.decode("utf-8", errors="ignore").lstrip())
+        ns   = NS_CTE
+        inf  = root.find(f".//{{{ns}}}infCte")
+        if inf is None: return None
+        ide = inf.find(f"{{{ns}}}ide")
+        if _t(ide,"mod",ns=ns) != "57": return None
 
-                st.subheader("📋 Auditoria Detalhada")
-                df_det = df_f.copy(); df_det['Base_DAS'] = df_det['Base_DAS'].apply(fmt_br)
-                st.dataframe(df_det[['Nota', 'Série', 'Espécie', 'CFOP', 'ST', 'Anexo', 'Base_DAS']], use_container_width=True)
-        else: st.error("Nenhuma nota encontrada.")
+        chave = inf.attrib.get("Id","")[3:]
+        emit  = _limpar(_t(inf,"emit/{%s}CNPJ" % ns) or _t(inf,"CNPJ",ns=ns))
+        v_tot = _dec(_t(root,"vTPrest",ns=ns) or _t(root,"vTotServ",ns=ns))
+        tp_nf = _t(ide,"tpNF",ns=ns) or "1"
 
-if __name__ == "__main__": main()
+        return NotaFiscal(
+            chave=chave, modelo="57",
+            cnpj_emitente=emit, cnpj_destinatario="",
+            tipo_op=tp_nf, valor_total=v_tot,
+            itens=[ItemNota(cfop="CTE", valor=v_tot, tem_st=False, tipo="frete")],
+            is_frete_cte=True,
+            decisoes=["CT-e de frete — NÃO entra na receita bruta do Simples. "
+                      "Se o frete já está embutido na NF-e, contar de novo seria duplicar."],
+            alertas=["CT-e excluído da receita bruta automaticamente."],
+        )
+    except:
+        return None
+
+# ── Parser NFS-e (múltiplos namespaces municipais) ────────────────────────────
+def _parse_nfse(conteudo: bytes) -> Optional[NotaFiscal]:
+    try:
+        xml_str = conteudo.decode("utf-8", errors="ignore").lstrip()
+        root = ET.fromstring(xml_str)
+    except:
+        return None
+
+    tag_raiz = root.tag.lower()
+    # Procura nó de NFS-e em envelopes
+    if not any(k in tag_raiz for k in ("nfse","compnfse","rps")):
+        for child in root.iter():
+            if any(k in child.tag.lower() for k in ("nfse","compnfse")):
+                root = child; break
+        else:
+            return None
+
+    m  = re.match(r"\{(.+?)\}", root.tag)
+    ns = m.group(1) if m else ""
+
+    def tx(*tags):
+        for tag in tags:
+            path = f".//{{{ns}}}{tag}" if ns else f".//{tag}"
+            el = root.find(path)
+            if el is not None and el.text:
+                return el.text.strip()
+        return ""
+
+    num      = tx("Numero","NumeroNFe","NumNFSe","nNFSe") or "0"
+    cnpj_e   = _limpar(tx("Cnpj","CNPJ","CnpjPrestador","cnpj"))
+    v_serv   = _dec(tx("ValorServicos","ValorLiquido","ValorNfse","Valor","ValorNF","vNF","ValorBruto"))
+    chave    = f"NFSE_{cnpj_e}_{num}"
+
+    if v_serv == 0:
+        return None
+
+    return NotaFiscal(
+        chave=chave, modelo="NFSe",
+        cnpj_emitente=cnpj_e, cnpj_destinatario="",
+        tipo_op="1", valor_total=v_serv,
+        itens=[ItemNota(cfop="SERV", valor=v_serv, tem_st=False, tipo="servico")],
+        decisoes=[f"NFS-e municipal (namespace: '{ns or 'sem namespace'}') — "
+                   "serviço entra pelo Anexo III, IV ou V conforme atividade cadastrada."],
+    )
+
+# ── Parser de evento de cancelamento ─────────────────────────────────────────
+def _parse_cancelamento(conteudo: bytes) -> List[str]:
+    """Retorna lista de chaves canceladas encontradas no arquivo."""
+    chaves = []
+    try:
+        root = ET.fromstring(conteudo.decode("utf-8", errors="ignore").lstrip())
+        ns   = NS_NFE
+        for ev in root.findall(f".//{{{ns}}}infEvento"):
+            if _t(ev,"tpEvento",ns=ns) == "110111":
+                ch = _t(ev,"chNFe",ns=ns)
+                if ch: chaves.append(ch)
+        # Também tenta chave direta na infNFe (arquivo de NF-e cancelada)
+        inf = root.find(f".//{{{ns}}}infNFe")
+        if inf is not None:
+            ch = inf.attrib.get("Id","")[3:]
+            if ch and _t(root,"dhCancelamento",ns=ns):
+                chaves.append(ch)
+    except:
+        pass
+    return chaves
+
+# ── Detecção automática de tipo ───────────────────────────────────────────────
+def _detectar(conteudo: bytes) -> tuple:
+    """Retorna (tipo, resultado) onde tipo é 'nota'|'cancelamento'."""
+    try:
+        txt = conteudo.decode("utf-8", errors="ignore").lower()
+    except:
+        return ("ignorado", None)
+
+    # Evento de cancelamento
+    if "inevento" in txt and "110111" in txt:
+        return ("cancelamento", _parse_cancelamento(conteudo))
+
+    # CT-e
+    if "infcte" in txt:
+        r = _parse_cte(conteudo)
+        if r: return ("nota", r)
+
+    # NFS-e
+    if any(k in txt[:800] for k in ("nfse","compnfse","numnfse")):
+        r = _parse_nfse(conteudo)
+        if r: return ("nota", r)
+
+    # NF-e / NFC-e
+    if "infnfe" in txt:
+        r = _parse_nfe(conteudo)
+        if r: return ("nota", r)
+
+    return ("ignorado", None)
+
+# ── Entrada principal ─────────────────────────────────────────────────────────
+def ler_arquivos(arquivos: List[tuple]) -> List[NotaFiscal]:
+    """
+    Recebe lista de (nome, bytes). Suporta ZIPs aninhados.
+    Aplica cancelamentos automaticamente.
+    """
+    notas:    List[NotaFiscal] = []
+    canceladas: set            = set()
+    _processar(arquivos, notas, canceladas)
+
+    # Aplica cancelamentos
+    for nota in notas:
+        if nota.chave in canceladas and not nota.cancelada:
+            nota.cancelada = True
+            nota.decisoes.append("CANCELADA — evento de cancelamento encontrado nos arquivos enviados.")
+
+    return notas
+
+def _processar(arquivos: List[tuple], notas: List[NotaFiscal], canceladas: set):
+    for nome, conteudo in arquivos:
+        nl = nome.lower()
+        if nl.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
+                    internos = [(n, z.read(n)) for n in z.namelist()]
+                _processar(internos, notas, canceladas)
+            except:
+                pass
+        elif nl.endswith(".xml"):
+            tipo, resultado = _detectar(conteudo)
+            if tipo == "nota" and resultado:
+                notas.append(resultado)
+            elif tipo == "cancelamento" and resultado:
+                canceladas.update(resultado)
+
+# ── Motor: cálculo DAS ───────────────────────────────────────────────────────
+getcontext().prec = 60
+D2  = Decimal("0.01")
+D13 = Decimal("0.0000000000001")
+
+# ── Configuração da empresa (informada pelo usuário) ──────────────────────────
+@dataclass
+class ConfigEmpresa:
+    nome: str
+    cnpj_raiz: str           # 8 primeiros dígitos
+    rbt12: Decimal
+    # Lista de segmentos: cada um tem anexo, tipo e flags especiais
+    # Ex: [{"anexo":"I","tipo":"mercadoria","tem_st":True},
+    #       {"anexo":"III","tipo":"servico","tem_st":False}]
+    segmentos: List[dict]
+    folha12: Optional[Decimal] = None     # para Fator R
+    cnpjs_filiais: List[str] = field(default_factory=list)
+    # Flags de desenquadramento
+    icms_fora_simples: bool = False
+    iss_fora_simples: bool  = False
+    das_dominio: Optional[Decimal] = None  # valor do Domínio para comparar
+
+# ── Resultado ─────────────────────────────────────────────────────────────────
+@dataclass
+class SegApurado:
+    tipo: str
+    anexo: str
+    anexo_efetivo: str         # pode mudar pelo Fator R
+    tem_st: bool
+    receita: Decimal
+    faixa: int
+    aliq_nominal: Decimal
+    deducao: Decimal
+    aliq_efetiva: Decimal      # 13 casas — igual ao PGDAS
+    das: Decimal
+    partilha: Dict[str, Decimal]
+    passos: List[str]          # explicações passo a passo do cálculo
+
+@dataclass
+class ResultadoEmpresa:
+    nome: str
+    cnpj_raiz: str
+    rbt12: Decimal
+    fator_r: Optional[Decimal]
+    receita_total: Decimal
+    das_total: Decimal
+    das_dominio: Optional[Decimal]
+    segmentos: List[SegApurado]
+    notas_validas: int
+    notas_canceladas: int
+    notas_devolucao: int
+    notas_frete: int
+    notas_transferencia: int
+    alertas: List[str]
+    # Comparação com Domínio
+    diff_dominio: Optional[Decimal] = None
+    analise_diff: List[str] = field(default_factory=list)
+
+# ── Cálculo core ──────────────────────────────────────────────────────────────
+
+def _aliq_efetiva(rbt12: Decimal, aliq_nom: Decimal, ded: Decimal) -> Decimal:
+    """Fórmula PGDAS: (RBT12 × Aliq − PD) / RBT12 com 13 casas decimais."""
+    return ((rbt12 * aliq_nom - ded) / rbt12).quantize(D13, ROUND_HALF_UP)
+
+def _remover_tributo(partilha: Dict[str, Decimal], tributo: str, passos: List[str]) -> Dict[str, Decimal]:
+    """Remove um tributo da partilha e redistribui proporcionalmente entre os demais."""
+    pct = partilha.get(tributo, Decimal("0"))
+    if pct == 0:
+        return partilha
+    sem = {k: v for k, v in partilha.items() if k != tributo}
+    total_sem = sum(sem.values())
+    nova = {tributo: Decimal("0")}
+    for t, p in sem.items():
+        nova[t] = (p / total_sem).quantize(D13) if total_sem > 0 else Decimal("0")
+    passos.append(
+        f"  → {tributo} removido da partilha ({float(pct):.2%}). "
+        f"Os demais tributos foram redistribuídos proporcionalmente."
+    )
+    return nova
+
+def _calcular_segmento(
+    receita: Decimal,
+    rbt12: Decimal,
+    anexo: str,
+    tem_st: bool,
+    icms_fora: bool,
+    iss_fora: bool,
+    folha12: Optional[Decimal],
+) -> SegApurado:
+    passos: List[str] = []
+    alertas_seg: List[str] = []
+
+    # ── Fator R ──────────────────────────────────────────────────────────────
+    anexo_efetivo = anexo
+    fator_r = None
+    if anexo == "V":
+        if folha12 is None or folha12 == 0:
+            passos.append(
+                "Anexo V sem folha informada — Fator R não calculado. "
+                "Tributando pelo Anexo V. ATENÇÃO: informe a folha de pagamento dos 12 meses "
+                "(salários brutos + pró-labore + encargos patronais + FGTS)."
+            )
+        else:
+            fator_r = (folha12 / rbt12).quantize(Decimal("0.0001"), ROUND_HALF_UP)
+            if fator_r >= FATOR_R_MIN:
+                anexo_efetivo = "III"
+                passos.append(
+                    f"Fator R = {float(fator_r):.2%} ≥ 28% → ANEXO III aplicado (menor alíquota). "
+                    f"A empresa tem folha robusta em relação ao faturamento."
+                )
+            else:
+                passos.append(
+                    f"Fator R = {float(fator_r):.2%} < 28% → ANEXO V aplicado (maior alíquota). "
+                    f"Se isso parece errado, verifique se o pró-labore e encargos foram incluídos na folha."
+                )
+
+    # ── Faixa e alíquota nominal ──────────────────────────────────────────────
+    faixa = get_faixa(anexo_efetivo, rbt12)
+    passos.append(
+        f"RBT12 = R$ {float(rbt12):,.2f} → Faixa {faixa.num} do {ANEXOS_DESC[anexo_efetivo]}. "
+        f"Alíquota nominal: {float(faixa.aliq_nom):.2%} | Dedução: R$ {float(faixa.deducao):,.2f}"
+    )
+
+    # ── Alíquota efetiva ──────────────────────────────────────────────────────
+    ae = _aliq_efetiva(rbt12, faixa.aliq_nom, faixa.deducao)
+    passos.append(
+        f"Alíquota efetiva = ({float(rbt12):,.2f} × {float(faixa.aliq_nom):.4%} − {float(faixa.deducao):,.2f}) "
+        f"÷ {float(rbt12):,.2f} = {float(ae):.13%}"
+    )
+
+    # ── Partilha base ─────────────────────────────────────────────────────────
+    partilha = get_partilha(anexo_efetivo, faixa.num)
+
+    # ── ST (Substituição Tributária) ──────────────────────────────────────────
+    if tem_st and "ICMS" in partilha and partilha["ICMS"] > 0:
+        pct_icms = partilha["ICMS"]
+        ae = (ae * (1 - pct_icms)).quantize(D13, ROUND_HALF_UP)
+        passos.append(
+            f"ST detectada: parcela ICMS ({float(pct_icms):.2%}) removida da alíquota efetiva. "
+            f"Novo alíquota efetiva = {float(ae):.13%}. "
+            f"Motivo: o ICMS já foi recolhido pelo fornecedor na entrada."
+        )
+        partilha = _remover_tributo(partilha, "ICMS", passos)
+
+    # ── Desenquadramento ICMS ─────────────────────────────────────────────────
+    if icms_fora and not tem_st and "ICMS" in partilha and partilha["ICMS"] > 0:
+        passos.append(
+            "ICMS desenquadrado do Simples: a empresa recolhe ICMS separadamente (SEFAZ). "
+            "A parcela de ICMS é removida do DAS."
+        )
+        partilha_pct = _remover_tributo(partilha, "ICMS", passos)
+        total_pct = sum(partilha_pct.values())
+        ae = (ae * total_pct).quantize(D13, ROUND_HALF_UP)
+        partilha = partilha_pct
+
+    # ── Desenquadramento ISS ──────────────────────────────────────────────────
+    if iss_fora and "ISS" in partilha and partilha["ISS"] > 0:
+        passos.append(
+            "ISS fora do Simples: município não aderiu ou empresa excluída. "
+            "ISS recolhido separadamente pela guia municipal."
+        )
+        partilha_pct = _remover_tributo(partilha, "ISS", passos)
+        total_pct = sum(partilha_pct.values())
+        ae = (ae * total_pct).quantize(D13, ROUND_HALF_UP)
+        partilha = partilha_pct
+
+    # ── Anexo IV: CPP sempre fora ─────────────────────────────────────────────
+    if anexo_efetivo == "IV":
+        passos.append(
+            "Anexo IV: CPP (previdência patronal) NUNCA está no DAS — recolher via GPS separada. "
+            "Isso não é desenquadramento, é a regra padrão do Anexo IV."
+        )
+
+    # ── DAS do segmento ───────────────────────────────────────────────────────
+    das = (receita * ae).quantize(D2, ROUND_HALF_UP)
+    passos.append(
+        f"DAS = R$ {float(receita):,.2f} × {float(ae):.13%} = R$ {float(das):,.2f}"
+    )
+
+    # ── Partilha em valores ───────────────────────────────────────────────────
+    partilha_val: Dict[str, Decimal] = {}
+    for t, p in partilha.items():
+        partilha_val[t] = (das * p).quantize(D2, ROUND_HALF_UP)
+
+    return SegApurado(
+        tipo=("Serviço" if anexo_efetivo in ("III","IV","V") else "Mercadoria"),
+        anexo=anexo, anexo_efetivo=anexo_efetivo,
+        tem_st=tem_st, receita=receita,
+        faixa=faixa.num, aliq_nominal=faixa.aliq_nom, deducao=faixa.deducao,
+        aliq_efetiva=ae, das=das, partilha=partilha_val, passos=passos,
+    )
+
+# ── Engine principal ──────────────────────────────────────────────────────────
+
+def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
+    alertas: List[str] = []
+
+    # Validação RBT12
+    if cfg.rbt12 > LIMITE_SIMPLES:
+        alertas.append(
+            f"RBT12 (R$ {float(cfg.rbt12):,.2f}) excede R$ 4.800.000 — "
+            "empresa pode estar fora do Simples Nacional. Verifique o enquadramento."
+        )
+
+    # ── Filtra notas da empresa (por CNPJ raiz ou lista explícita de filiais) ──
+    cnpjs_ok = set(cfg.cnpjs_filiais) if cfg.cnpjs_filiais else set()
+
+    def pertence(n: NotaFiscal) -> bool:
+        if cnpjs_ok:
+            return n.cnpj_emitente in cnpjs_ok
+        return n.cnpj_emitente[:8] == cfg.cnpj_raiz[:8]
+
+    notas_emp = [n for n in notas if pertence(n) and n.tipo_op == "1"]
+
+    n_canceladas   = sum(1 for n in notas_emp if n.cancelada)
+    n_frete        = sum(1 for n in notas_emp if n.is_frete_cte and not n.cancelada)
+    n_transf       = sum(1 for n in notas_emp if n.is_transferencia and not n.cancelada)
+    n_dev          = sum(1 for n in notas_emp if n.is_devolucao and not n.cancelada)
+    notas_validas  = [n for n in notas_emp if not n.cancelada and not n.is_frete_cte]
+
+    # Alertas sobre notas
+    if n_canceladas > 0:
+        alertas.append(f"{n_canceladas} nota(s) cancelada(s) excluída(s) da receita.")
+    if n_frete > 0:
+        alertas.append(f"{n_frete} CT-e(s) excluído(s) — frete não entra na receita bruta do Simples.")
+    if n_transf > 0:
+        alertas.append(f"{n_transf} nota(s) de transferência entre estabelecimentos excluída(s).")
+    if n_dev > 0:
+        alertas.append(f"{n_dev} nota(s) de devolução — valor SUBTRAÍDO da receita do mês.")
+
+    # ── Acumula receita por (tipo, tem_st) ────────────────────────────────────
+    acumulado: Dict[tuple, Decimal] = {}
+    for nota in notas_validas:
+        sinal = Decimal("-1") if nota.is_devolucao else Decimal("1")
+        for item in nota.itens:
+            if item.tipo == "transferencia":
+                continue
+            k = (item.tipo, item.tem_st)
+            acumulado[k] = acumulado.get(k, Decimal("0")) + sinal * item.valor
+
+    # Aviso se receita for negativa (mais devoluções que vendas)
+    for (tipo_seg, st_seg), v in acumulado.items():
+        if v < 0:
+            alertas.append(
+                f"Receita de '{tipo_seg}' (ST={st_seg}) negativa: R$ {float(v):,.2f}. "
+                "Devoluções superam as vendas neste segmento no mês."
+            )
+
+    # ── Calcula DAS por segmento configurado ───────────────────────────────────
+    segs_apurados: List[SegApurado] = []
+    receita_total  = Decimal("0")
+    das_total      = Decimal("0")
+    tipos_usados   = set()
+
+    for sc in cfg.segmentos:
+        tipo_cfg = sc.get("tipo","mercadoria")
+        st_cfg   = sc.get("tem_st", False)
+        anexo    = sc.get("anexo","I")
+
+        # Match exato, depois por tipo sem ST
+        receita = acumulado.get((tipo_cfg, st_cfg), Decimal("0"))
+        if receita == 0:
+            receita = acumulado.get((tipo_cfg, not st_cfg), Decimal("0"))
+        if receita <= 0:
+            continue
+
+        tipos_usados.add((tipo_cfg, st_cfg))
+
+        seg = _calcular_segmento(
+            receita, cfg.rbt12, anexo, st_cfg,
+            cfg.icms_fora_simples, cfg.iss_fora_simples, cfg.folha12,
+        )
+        seg.tipo = tipo_cfg.capitalize()
+        segs_apurados.append(seg)
+        receita_total += receita
+        das_total     += seg.das
+
+    # Avisos de receitas sem segmento configurado
+    for (tipo_seg, st_seg), v in acumulado.items():
+        if (tipo_seg, st_seg) not in tipos_usados and v > 0:
+            alertas.append(
+                f"ATENÇÃO: receita de '{tipo_seg}' (ST={st_seg}) = R$ {float(v):,.2f} "
+                f"não tem segmento configurado e NÃO entrou no DAS. "
+                f"Adicione um segmento para esse tipo na configuração da empresa."
+            )
+
+    # ── Comparação com Domínio ────────────────────────────────────────────────
+    diff = None
+    analise: List[str] = []
+    if cfg.das_dominio is not None:
+        diff = das_total - cfg.das_dominio
+        if abs(diff) < Decimal("0.05"):
+            analise.append("Resultado IGUAL ao Domínio (diferença < R$ 0,05 — apenas arredondamento).")
+        elif diff > 0:
+            analise.append(
+                f"App calculou R$ {float(diff):,.2f} a MAIS que o Domínio. "
+                "Possíveis causas: (1) alguma nota excluída no Domínio e incluída aqui, "
+                "(2) ST não aplicada no app mas aplicada no Domínio, "
+                "(3) nota de transferência incluída indevidamente aqui."
+            )
+        else:
+            analise.append(
+                f"Domínio calculou R$ {float(abs(diff)):,.2f} a MAIS que o app. "
+                "Possíveis causas: (1) nota incluída no Domínio que o app não leu, "
+                "(2) ST aplicada no app mas não no Domínio, "
+                "(3) pró-labore/folha diferente para o Fator R."
+            )
+
+    return ResultadoEmpresa(
+        nome=cfg.nome, cnpj_raiz=cfg.cnpj_raiz, rbt12=cfg.rbt12,
+        fator_r=next((s.aliq_efetiva for s in segs_apurados if s.anexo == "V"), None),
+        receita_total=receita_total, das_total=das_total,
+        das_dominio=cfg.das_dominio,
+        segmentos=segs_apurados,
+        notas_validas=len(notas_validas), notas_canceladas=n_canceladas,
+        notas_devolucao=n_dev, notas_frete=n_frete, notas_transferencia=n_transf,
+        alertas=alertas, diff_dominio=diff, analise_diff=analise,
+    )
+
+def apurar_lote(configs: List[ConfigEmpresa], notas: List[NotaFiscal]) -> List[ResultadoEmpresa]:
+    return [apurar(cfg, notas) for cfg in configs]
+
+# ── Config / pastas locais ───────────────────────────────────────────────────
+
+CONFIG_JSON = Path(__file__).resolve().parent / "config_app.json"
+
+
+@dataclass
+class AppRuntimeConfig:
+    """modo: upload | hibrido | pastas — URL opcional para Chrome / compartilhar na LAN."""
+
+    modo: str
+    pastas_padrao: List[str] = field(default_factory=list)
+    recursivo: bool = True
+    app_url: Optional[str] = None
+
+    @property
+    def permite_upload(self) -> bool:
+        return self.modo in ("upload", "hibrido")
+
+    @property
+    def permite_pastas(self) -> bool:
+        return self.modo in ("hibrido", "pastas")
+
+    @property
+    def modo_label(self) -> str:
+        return {"upload": "Somente upload", "hibrido": "Híbrido", "pastas": "Somente pastas locais"}.get(
+            self.modo, self.modo
+        )
+
+    @property
+    def perfil_execucao(self) -> str:
+        """Texto curto para a sidebar: online (nuvem) vs híbrido/servidor neste PC."""
+        if self.modo == "upload":
+            return "Total online (upload no navegador)"
+        if self.modo == "hibrido":
+            return "Híbrido — servidor neste PC + pastas e/ou upload"
+        return "Pastas locais — servidor neste PC (sem upload)"
+
+
+def _json_load(path: Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _truthy(v: Optional[str]) -> bool:
+    if v is None:
+        return True
+    return str(v).strip().lower() in ("1", "true", "yes", "sim", "on")
+
+
+def _parse_pastas_env(s: Optional[str]) -> List[str]:
+    if not s or not str(s).strip():
+        return []
+    # aceita quebra de linha ou ;
+    parts: List[str] = []
+    for block in str(s).replace(";", "\n").splitlines():
+        t = block.strip()
+        if t:
+            parts.append(t)
+    return parts
+
+
+def _secrets_get(key: str) -> Optional[str]:
+    try:
+        import streamlit as st  # noqa: WPS433
+
+        if hasattr(st, "secrets") and key in st.secrets:
+            v = st.secrets[key]
+            return str(v) if v is not None else None
+    except Exception:
+        pass
+    return None
+
+
+def carregar_config() -> AppRuntimeConfig:
+    modo = "upload"
+    pastas: List[str] = []
+    recursivo = True
+    app_url: Optional[str] = None
+
+    if CONFIG_JSON.exists():
+        try:
+            data = _json_load(CONFIG_JSON)
+            modo = str(data.get("modo", modo)).strip().lower() or modo
+            px = data.get("pastas_xml") or {}
+            if isinstance(px, dict):
+                pastas = [str(p).strip() for p in px.get("caminhos", []) if str(p).strip()]
+                recursivo = bool(px.get("recursivo", True))
+            au = data.get("app_url")
+            if au and str(au).strip():
+                app_url = str(au).strip().rstrip("/")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    env_modo = os.environ.get("SN_MODO")
+    if env_modo:
+        modo = env_modo.strip().lower()
+
+    env_pastas = os.environ.get("SN_PASTAS")
+    if env_pastas:
+        pastas = _parse_pastas_env(env_pastas)
+
+    env_rec = os.environ.get("SN_RECURSIVO")
+    if env_rec is not None:
+        recursivo = _truthy(env_rec)
+
+    sm = _secrets_get("SN_MODO")
+    if sm:
+        modo = sm.strip().lower()
+
+    sp = _secrets_get("SN_PASTAS")
+    if sp:
+        pastas = _parse_pastas_env(sp)
+
+    sr = _secrets_get("SN_RECURSIVO")
+    if sr is not None:
+        recursivo = _truthy(sr)
+
+    if modo not in ("upload", "hibrido", "pastas"):
+        modo = "upload"
+
+    # Na nuvem, pastas locais não existem no servidor — força upload.
+    if os.environ.get("SN_FORCAR_UPLOAD", "").strip().lower() in ("1", "true", "yes", "sim"):
+        modo = "upload"
+        pastas = []
+
+    sec_url = _secrets_get("SN_APP_URL")
+    if sec_url and str(sec_url).strip():
+        app_url = str(sec_url).strip().rstrip("/")
+    env_url = os.environ.get("SN_APP_URL", "").strip()
+    if env_url:
+        app_url = env_url.rstrip("/")
+
+    return AppRuntimeConfig(
+        modo=modo, pastas_padrao=pastas, recursivo=recursivo, app_url=app_url
+    )
+
+
+def resolver_url_app(cfg: AppRuntimeConfig) -> str:
+    """URL desta instância (Chrome, links). Prioridade: SN_APP_URL / secrets > config app_url > localhost."""
+    if cfg.app_url:
+        return cfg.app_url.rstrip("/")
+    port = os.environ.get("STREAMLIT_SERVER_PORT", os.environ.get("PORT", "8501")).strip()
+    try:
+        p = int(port)
+    except ValueError:
+        p = 8501
+    return f"http://127.0.0.1:{p}"
+
+
+def ambiente_so_web(cfg: AppRuntimeConfig) -> bool:
+    """
+    True = interface para usuário final na web: sem menções a disco local, D:\\, scripts ou servidor.
+    Use SN_AMBIENTE=local no Garimpeiro para forçar textos completos de desenvolvimento.
+    """
+    if os.environ.get("SN_AMBIENTE", "").strip().lower() == "local":
+        return False
+    if os.environ.get("SN_AMBIENTE", "").strip().lower() == "online":
+        return True
+    if os.environ.get("STREAMLIT_CLOUD", "").strip() in ("1", "true", "True", "yes"):
+        return True
+    if cfg.modo == "upload":
+        return True
+    return False
+
+
+def listar_arquivos_fiscais(caminhos: List[str], recursivo: bool) -> Tuple[List[Tuple[str, bytes]], List[str]]:
+    """
+    Retorna (lista de (nome_para_log, bytes), avisos).
+    `nome_para_log` evita colisões quando há várias pastas.
+    """
+    saida: List[Tuple[str, bytes]] = []
+    avisos: List[str] = []
+    vistos: set[str] = set()
+
+    for raw in caminhos:
+        p = Path(raw).expanduser()
+        try:
+            p = p.resolve()
+        except OSError:
+            avisos.append(f"Caminho inválido ou inacessível: {raw}")
+            continue
+
+        if not p.exists():
+            avisos.append(f"Não existe: {p}")
+            continue
+
+        if p.is_file():
+            suf = p.suffix.lower()
+            if suf not in (".xml", ".zip"):
+                avisos.append(f"Ignorado (não é .xml/.zip): {p}")
+                continue
+            chave = str(p)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            try:
+                saida.append((p.name, p.read_bytes()))
+            except OSError as e:
+                avisos.append(f"Erro ao ler {p}: {e}")
+            continue
+
+        if p.is_dir():
+            base_nome = p.name or str(p)
+            if recursivo:
+                iterador = p.rglob("*")
+            else:
+                iterador = p.glob("*")
+            for f in iterador:
+                if not f.is_file():
+                    continue
+                suf = f.suffix.lower()
+                if suf not in (".xml", ".zip"):
+                    continue
+                chave = str(f.resolve())
+                if chave in vistos:
+                    continue
+                vistos.add(chave)
+                try:
+                    rel = f.relative_to(p).as_posix()
+                    nome_log = f"{base_nome}/{rel}"
+                    saida.append((nome_log, f.read_bytes()))
+                except OSError as e:
+                    avisos.append(f"Erro ao ler {f}: {e}")
+
+    return saida, avisos
+
+# ── Interface Streamlit ─────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Apuração Simples Nacional",
+    page_icon="📊",
+    layout="wide",
+)
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def br(v, prefix="R$ ") -> str:
+    try:
+        s = f"{float(v):,.2f}".replace(",","X").replace(".",",").replace("X",".")
+        return f"{prefix}{s}"
+    except:
+        return "—"
+
+def pct(v) -> str:
+    try: return f"{float(v)*100:.13f}%".replace(".",",")
+    except: return "—"
+
+def pct2(v) -> str:
+    try: return f"{float(v)*100:.2f}%".replace(".",",")
+    except: return "—"
+
+def parse(txt: str) -> Decimal:
+    t = txt.strip().replace("R$","").replace(" ","").replace(".","").replace(",",".")
+    return Decimal(t) if t else Decimal("0")
+
+def cnpj8(s: str) -> str:
+    return "".join(c for c in s if c.isdigit())[:8]
+
+def cnpj14(s: str) -> str:
+    return "".join(c for c in s if c.isdigit())
+
+def _abrir_simples_no_chrome(url: str) -> Tuple[bool, str]:
+    """Tenta Google Chrome no Windows; senão navegador padrão. Retorna (usou_chrome, mensagem)."""
+    if os.name == "nt":
+        candidatos = [
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for exe in candidatos:
+            if exe and os.path.isfile(exe):
+                try:
+                    subprocess.Popen([exe, url], close_fds=True)
+                    return True, "Abrindo no Google Chrome…"
+                except OSError:
+                    continue
+    try:
+        webbrowser.open(url)
+    except OSError:
+        return False, "Não foi possível abrir o navegador."
+    return False, "Chrome não encontrado — abrindo no navegador padrão."
+
+# ── Estado de sessão ──────────────────────────────────────────────────────────
+if "configs"    not in st.session_state: st.session_state.configs    = []
+if "notas"      not in st.session_state: st.session_state.notas      = []
+if "resultados" not in st.session_state: st.session_state.resultados = []
+
+RUN_CFG = carregar_config()
+_url_app = resolver_url_app(RUN_CFG)
+_SO_WEB = ambiente_so_web(RUN_CFG)
+
+# ── Barra lateral — mesmo ritmo do app legado: blocos + **Ações** + botão primário ───
+with st.sidebar:
+    st.markdown("##### Simples Nacional")
+    if _SO_WEB:
+        st.caption("Envie os XML ou ZIP na aba **Carregar XMLs**.")
+    else:
+        st.caption(RUN_CFG.perfil_execucao)
+        st.caption(f"XML: **{RUN_CFG.modo_label}**")
+
+    st.divider()
+    st.markdown("**Ações**")
+    if not _SO_WEB:
+        st.caption(_url_app)
+    if st.button(
+        "Abrir app no Chrome",
+        type="primary",
+        use_container_width=True,
+        help=(
+            "Abre o endereço do app no Google Chrome."
+            if _SO_WEB
+            else (
+                "Abre esta URL no Google Chrome (Windows). Na rede local, defina app_url ou SN_APP_URL "
+                "com o IP da máquina (ex.: http://192.168.0.10:8501)."
+            )
+        ),
+    ):
+        _chrome, msg = _abrir_simples_no_chrome(_url_app)
+        st.toast(msg, icon="🌐")
+
+    if not _SO_WEB:
+        st.divider()
+        st.markdown("**Servidor**")
+        st.caption(
+            "Nuvem: só upload. Neste PC: `py -m streamlit run app.py` (opcional: `SN_MODO=hibrido`)."
+        )
+
+# ── Título ────────────────────────────────────────────────────────────────────
+st.title("📊 Apuração do Simples Nacional")
+if _SO_WEB:
+    st.caption(
+        "Escritório Contábil · Os dados ficam nesta sessão do navegador até você fechar a aba."
+    )
+else:
+    st.caption(
+        "Escritório Contábil · Sem banco de dados · Fechar o browser reinicia tudo · "
+        f"Origem XML: **{RUN_CFG.modo_label}** (`config_app.json`, secrets ou `SN_MODO`)"
+    )
+
+abas = st.tabs([
+    "1️⃣ Empresas",
+    "2️⃣ Carregar XMLs",
+    "3️⃣ Calcular",
+    "4️⃣ Resultados",
+    "📚 Guia de regras",
+])
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 1 — EMPRESAS
+# ══════════════════════════════════════════════════════════════════════════════
+with abas[0]:
+    st.header("Configurar empresas")
+    st.info(
+        "**Mínimo para preencher:** nome, CNPJ raiz, RBT12 e pelo menos um segmento. "
+        "O sistema cuida do resto lendo os XMLs."
+    )
+
+    with st.form("nova_empresa", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            nome       = st.text_input("Nome / Razão Social *")
+            cnpj_input = st.text_input("CNPJ raiz (8 dígitos) ou CNPJ completo *",
+                                        help="Os 8 primeiros dígitos agrupam matriz e filiais automaticamente.")
+            rbt12_txt  = st.text_input("RBT12 — Receita acumulada dos 12 meses ANTERIORES (R$) *",
+                                        placeholder="500.000,00",
+                                        help="Não inclua o mês atual. Some receitas de matriz + filiais.")
+            filiais_txt = st.text_area(
+                "CNPJs completos das filiais (um por linha — opcional)",
+                placeholder="12.345.678/0001-99\n12.345.678/0002-70",
+                help="Preencha só se quiser filtrar CNPJs específicos em vez de usar o CNPJ raiz.",
+            )
+
+        with c2:
+            das_dominio_txt = st.text_input(
+                "DAS conforme Domínio (R$) — para comparação",
+                placeholder="3.252,60",
+                help="Preencha com o valor gerado pelo seu sistema. O app vai comparar e explicar as diferenças.",
+            )
+            folha12_txt = st.text_input(
+                "Folha de pagamento — 12 meses (R$)",
+                placeholder="0,00",
+                help="Obrigatório para Anexo V. Inclua: salários brutos + pró-labore + INSS patronal + FGTS.",
+            )
+            icms_fora = st.checkbox(
+                "ICMS desenquadrado do Simples (recolhe ICMS separado pelo Estado)",
+                help="Marque se o Estado excluiu esta empresa do ICMS do Simples Nacional.",
+            )
+            iss_fora = st.checkbox(
+                "ISS fora do Simples (município não aderiu ou empresa excluída)",
+                help="Marque se o ISS é recolhido separadamente pela guia municipal.",
+            )
+
+            st.markdown("**Segmentos de receita desta empresa**")
+            st.caption("Um segmento por tipo de atividade. Empresa mista = dois segmentos.")
+            n_segs = st.number_input("Quantos segmentos?", 1, 5, 1)
+            segs_in = []
+            for i in range(int(n_segs)):
+                ca, cb, cc = st.columns(3)
+                tipo  = ca.selectbox("Tipo",   ["mercadoria","servico"],
+                                     key=f"t{i}", format_func=lambda x: x.capitalize())
+                anexo = cb.selectbox("Anexo",  list(ANEXOS_DESC.keys()),
+                                     key=f"a{i}", format_func=lambda x: ANEXOS_DESC[x])
+                st_cb = cc.checkbox("ST?", key=f"s{i}",
+                                    help="Marque se as mercadorias são compradas com ICMS-ST já pago.")
+                segs_in.append({"tipo":tipo,"anexo":anexo,"tem_st":st_cb})
+
+        salvar = st.form_submit_button("➕ Adicionar empresa", type="primary")
+        if salvar:
+            erros = []
+            if not nome.strip():       erros.append("Informe o nome.")
+            if not cnpj_input.strip(): erros.append("Informe o CNPJ.")
+            try:
+                rbt12 = parse(rbt12_txt)
+                assert rbt12 > 0
+            except:
+                erros.append("RBT12 inválido ou zerado.")
+                rbt12 = Decimal("0")
+
+            if erros:
+                for e in erros: st.error(e)
+            else:
+                filiais = [cnpj14(x) for x in filiais_txt.strip().splitlines() if x.strip()]
+                st.session_state.configs.append(ConfigEmpresa(
+                    nome=nome.strip(),
+                    cnpj_raiz=cnpj8(cnpj_input),
+                    rbt12=rbt12,
+                    segmentos=segs_in,
+                    folha12=parse(folha12_txt) if folha12_txt.strip() else None,
+                    cnpjs_filiais=filiais,
+                    icms_fora_simples=icms_fora,
+                    iss_fora_simples=iss_fora,
+                    das_dominio=parse(das_dominio_txt) if das_dominio_txt.strip() else None,
+                ))
+                st.success(f"✅ {nome} adicionada!")
+                st.rerun()
+
+    # Lista
+    if st.session_state.configs:
+        st.subheader(f"{len(st.session_state.configs)} empresa(s) configurada(s)")
+        for i, cfg in enumerate(st.session_state.configs):
+            segs_str = " + ".join(
+                f"{s['tipo'].capitalize()} Anexo {s['anexo']}"
+                + (" (ST)" if s["tem_st"] else "")
+                for s in cfg.segmentos
+            )
+            col1, col2 = st.columns([6,1])
+            flags = []
+            if cfg.icms_fora_simples: flags.append("ICMS fora")
+            if cfg.iss_fora_simples:  flags.append("ISS fora")
+            if cfg.folha12:           flags.append(f"Folha {br(cfg.folha12)}")
+            col1.markdown(
+                f"**{cfg.nome}** · Raiz `{cfg.cnpj_raiz}` · RBT12 {br(cfg.rbt12)} · "
+                f"{segs_str}" + (f" · {' | '.join(flags)}" if flags else "")
+            )
+            if col2.button("🗑️", key=f"del{i}"):
+                st.session_state.configs.pop(i); st.rerun()
+    else:
+        st.info("Nenhuma empresa configurada ainda.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 2 — CARREGAR XMLs
+# ══════════════════════════════════════════════════════════════════════════════
+with abas[1]:
+    st.header("Carregar arquivos XML / ZIP")
+    st.info(
+        "Aceita **XMLs soltos e ZIPs aninhados** (ZIP dentro de ZIP). "
+        "O sistema detecta automaticamente NF-e, NFC-e, NFS-e, CT-e e cancelamentos."
+    )
+
+    if RUN_CFG.modo == "upload":
+        if not _SO_WEB:
+            st.success(
+                "**Modo somente upload** — ideal para Streamlit Cloud / GitHub. "
+                "Os arquivos vêm só do navegador; o servidor não acessa pastas do seu PC."
+            )
+    elif RUN_CFG.modo == "hibrido":
+        st.success(
+            "**Modo híbrido** — use pastas neste computador **e/ou** upload. "
+            "Útil com `streamlit run` na sua máquina."
+        )
+    else:
+        st.warning(
+            "**Modo somente pastas** — não há upload; informe caminhos válidos abaixo. "
+            "Indicado para automação local."
+        )
+
+    if RUN_CFG.permite_upload:
+        uploaded = st.file_uploader(
+            "Enviar arquivos pelo navegador",
+            type=["xml", "zip"],
+            accept_multiple_files=True,
+        )
+        if uploaded and st.button("📂 Processar arquivos enviados", type="primary"):
+            with st.spinner("Lendo XMLs..."):
+                arquivos = [(f.name, f.read()) for f in uploaded]
+                notas = ler_arquivos(arquivos)
+                st.session_state.notas = notas
+            st.success(f"✅ {len(notas)} documento(s) lido(s).")
+
+    if RUN_CFG.permite_pastas:
+        st.subheader("Pastas ou arquivos no computador (servidor Streamlit)")
+        st.caption(
+            "Caminhos absolutos no Windows, um por linha. "
+            "Pastas do `config_app.json` aparecem como padrão; você pode editar antes de processar."
+        )
+        default_txt = "\n".join(RUN_CFG.pastas_padrao)
+        caminhos_txt = st.text_area(
+            "Caminhos (pastas ou arquivos .xml / .zip)",
+            value=default_txt,
+            height=120,
+            placeholder="D:\\Contabilidade\\XMLs\\ClienteX",
+            key="paths_xml_local",
+        )
+        c1, c2 = st.columns(2)
+        rec_user = c1.checkbox(
+            "Buscar subpastas (recursivo)",
+            value=RUN_CFG.recursivo,
+            key="rec_xml_local",
+        )
+        if c2.button("📁 Processar pastas locais", type="primary"):
+            paths = [ln.strip() for ln in caminhos_txt.splitlines() if ln.strip()]
+            if not paths:
+                st.error("Informe pelo menos um caminho.")
+            else:
+                with st.spinner("Lendo arquivos do disco..."):
+                    arquivos, avisos = listar_arquivos_fiscais(paths, rec_user)
+                    for a in avisos:
+                        st.warning(a)
+                    if not arquivos:
+                        st.error("Nenhum .xml ou .zip encontrado nesses caminhos.")
+                    else:
+                        notas = ler_arquivos(arquivos)
+                        st.session_state.notas = notas
+                        st.success(
+                            f"✅ {len(notas)} documento(s) a partir de **{len(arquivos)}** arquivo(s) no disco."
+                        )
+
+    notas: List[NotaFiscal] = st.session_state.notas
+    if notas:
+        # Contadores
+        c = {
+            "NF-e (55)":    sum(1 for n in notas if n.modelo=="55"),
+            "NFC-e (65)":   sum(1 for n in notas if n.modelo=="65"),
+            "NFS-e":        sum(1 for n in notas if n.modelo=="NFSe"),
+            "CT-e":         sum(1 for n in notas if n.modelo=="57"),
+            "Canceladas":   sum(1 for n in notas if n.cancelada),
+            "Devoluções":   sum(1 for n in notas if n.is_devolucao and not n.cancelada),
+            "Transferências": sum(1 for n in notas if n.is_transferencia),
+        }
+        cols = st.columns(len(c))
+        for col, (label, val) in zip(cols, c.items()):
+            col.metric(label, val)
+
+        with st.expander("🔍 Ver todas as notas lidas (com decisões do sistema)"):
+            linhas = []
+            for n in notas:
+                status = []
+                if n.cancelada:        status.append("CANCELADA")
+                if n.is_devolucao:     status.append("DEVOLUÇÃO")
+                if n.is_transferencia: status.append("TRANSFERÊNCIA")
+                if n.is_frete_cte:     status.append("FRETE (excluído)")
+                linhas.append({
+                    "Modelo":    n.modelo,
+                    "Emitente":  n.cnpj_emitente,
+                    "Valor":     br(n.valor_total),
+                    "CFOPs":     ", ".join(dict.fromkeys(n.cfops))[:50],
+                    "ST":        "Sim" if n.tem_st else "Não",
+                    "Status":    ", ".join(status) or "OK",
+                    "Decisão":   n.decisoes[0][:80] if n.decisoes else "",
+                })
+            st.dataframe(pd.DataFrame(linhas), use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 3 — CALCULAR
+# ══════════════════════════════════════════════════════════════════════════════
+with abas[2]:
+    st.header("Calcular DAS")
+
+    ne = len(st.session_state.configs)
+    nn = len(st.session_state.notas)
+    st.metric("Empresas configuradas", ne)
+    st.metric("XMLs carregados", nn)
+
+    if ne == 0:
+        st.warning("Configure pelo menos uma empresa na aba 1.")
+    elif nn == 0:
+        st.warning("Carregue os XMLs na aba 2.")
+    else:
+        if st.button("🚀 Calcular DAS de todas as empresas", type="primary"):
+            with st.spinner("Calculando..."):
+                resultados = apurar_lote(st.session_state.configs, st.session_state.notas)
+                st.session_state.resultados = resultados
+            st.success("✅ Concluído! Veja os resultados na aba 4.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 4 — RESULTADOS
+# ══════════════════════════════════════════════════════════════════════════════
+with abas[3]:
+    st.header("Resultados")
+
+    resultados: List[ResultadoEmpresa] = st.session_state.resultados
+    if not resultados:
+        st.info("Execute o cálculo na aba 3.")
+        st.stop()
+
+    # ── Resumo geral ──────────────────────────────────────────────────────────
+    st.subheader("Resumo geral")
+    linhas_resumo = []
+    for r in resultados:
+        linha = {
+            "Empresa":       r.nome,
+            "Notas válidas": r.notas_validas,
+            "Canceladas":    r.notas_canceladas,
+            "Devoluções":    r.notas_devolucao,
+            "Receita total": br(r.receita_total),
+            "DAS (app)":     br(r.das_total),
+        }
+        if r.das_dominio is not None:
+            linha["DAS (Domínio)"] = br(r.das_dominio)
+            linha["Diferença"]     = br(r.diff_dominio, prefix="")
+        linhas_resumo.append(linha)
+
+    st.dataframe(pd.DataFrame(linhas_resumo), use_container_width=True)
+    st.metric("Total DAS todas as empresas", br(sum(r.das_total for r in resultados)))
+    st.divider()
+
+    # ── Detalhe por empresa ───────────────────────────────────────────────────
+    for r in resultados:
+
+        # Cabeçalho colorido por status de comparação
+        if r.das_dominio is not None and r.diff_dominio is not None:
+            if abs(r.diff_dominio) < Decimal("0.05"):
+                badge = "✅ Igual ao Domínio"
+            elif r.diff_dominio > 0:
+                badge = f"⚠️ App {br(r.diff_dominio)} a mais que Domínio"
+            else:
+                badge = f"⚠️ Domínio {br(abs(r.diff_dominio))} a mais que App"
+        else:
+            badge = ""
+
+        titulo = f"📋 {r.nome}  —  DAS {br(r.das_total)}"
+        if badge: titulo += f"  {badge}"
+
+        with st.expander(titulo, expanded=True):
+
+            # Alertas
+            for al in r.alertas:
+                st.warning(al)
+
+            # Análise de diferença com Domínio
+            if r.analise_diff:
+                for an in r.analise_diff:
+                    st.info(an)
+
+            # Métricas
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Receita total", br(r.receita_total))
+            c2.metric("DAS (app)",     br(r.das_total))
+            if r.das_dominio:
+                c3.metric("DAS (Domínio)", br(r.das_dominio))
+                c4.metric("Diferença",     br(r.diff_dominio, prefix=""))
+            else:
+                c3.metric("Notas válidas",  r.notas_validas)
+                c4.metric("Devoluções",     r.notas_devolucao)
+
+            # Segmentos
+            for seg in r.segmentos:
+                st.markdown(f"---")
+                st.markdown(
+                    f"**{seg.tipo} · Anexo {seg.anexo_efetivo}**"
+                    + (" *(Fator R aplicado)*" if seg.anexo != seg.anexo_efetivo else "")
+                    + (" · (ST)" if seg.tem_st else "")
+                )
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.metric("Receita do segmento", br(seg.receita))
+                sc2.metric(f"Faixa",              f"{seg.faixa}ª")
+                sc3.metric("Alíq. efetiva",       pct(seg.aliq_efetiva))
+                sc4.metric("DAS do segmento",     br(seg.das))
+
+                # Passo a passo do cálculo — PEDAGÓGICO
+                with st.expander("📖 Como o sistema chegou nesse valor (passo a passo)"):
+                    for i, passo in enumerate(seg.passos, 1):
+                        st.markdown(f"**Passo {i}:** {passo}")
+
+                # Partilha
+                with st.expander("💰 Partilha por tributo"):
+                    df_p = pd.DataFrame([
+                        {"Tributo": t, "% na partilha": pct2(p/seg.das) if seg.das > 0 else "0%",
+                         "Valor": br(p)}
+                        for t in TRIBUTOS_ORDEM if (p := seg.partilha.get(t)) is not None
+                    ])
+                    st.table(df_p)
+
+            # Notas desta empresa
+            notas_all: List[NotaFiscal] = st.session_state.notas
+            cfg_emp = next((c for c in st.session_state.configs if c.cnpj_raiz == r.cnpj_raiz), None)
+            cnpjs_ok = set(cfg_emp.cnpjs_filiais) if cfg_emp and cfg_emp.cnpjs_filiais else set()
+
+            def pertence_emp(n: NotaFiscal) -> bool:
+                if cnpjs_ok: return n.cnpj_emitente in cnpjs_ok
+                return n.cnpj_emitente[:8] == r.cnpj_raiz[:8]
+
+            notas_emp = [n for n in notas_all if pertence_emp(n) and n.tipo_op == "1"]
+            with st.expander(f"🗂️ {len(notas_emp)} nota(s) desta empresa"):
+                linhas_n = []
+                for n in notas_emp:
+                    status = []
+                    if n.cancelada:        status.append("CANCELADA")
+                    if n.is_devolucao:     status.append("DEVOLUÇÃO (-)")
+                    if n.is_transferencia: status.append("TRANSFERÊNCIA (excluída)")
+                    if n.is_frete_cte:     status.append("FRETE (excluído)")
+                    linhas_n.append({
+                        "Modelo":    n.modelo,
+                        "Emitente":  n.cnpj_emitente,
+                        "Valor":     br(n.valor_total),
+                        "Na receita":br(n.valor_receita),
+                        "CFOPs":     ", ".join(dict.fromkeys(n.cfops))[:50],
+                        "ST":        "Sim" if n.tem_st else "Não",
+                        "Status":    ", ".join(status) or "OK",
+                    })
+                st.dataframe(pd.DataFrame(linhas_n), use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ABA 5 — GUIA DE REGRAS
+# ══════════════════════════════════════════════════════════════════════════════
+with abas[4]:
+    st.header("📚 Guia de regras — Simples Nacional")
+    st.caption("Consulte sempre que tiver dúvida. Compare com o que o Domínio gerou.")
+
+    tema = st.selectbox("Escolha o tema:", [
+        "O que entra na receita bruta",
+        "CFOPs: entra ou não entra?",
+        "Substituição Tributária (ST)",
+        "Fator R (Anexo III vs V)",
+        "Desenquadramento ICMS/ISS",
+        "Matriz e filial",
+        "A fórmula do DAS explicada",
+        "Por que meu resultado difere do Domínio?",
+    ])
+
+    if tema == "O que entra na receita bruta":
+        st.markdown("""
+### O que ENTRA na receita bruta
+
+| O que é | Entra? | Por quê |
+|---|---|---|
+| Venda de mercadoria (NF-e 55 / NFC-e 65) | ✅ Sim | Operação principal |
+| Prestação de serviço (NFS-e) | ✅ Sim | Operação principal |
+| Venda com ST (ICMS já pago) | ✅ Sim | Entra na base; só a alíquota é reduzida |
+| Receita de filiais | ✅ Sim | Consolida na matriz |
+
+### O que NÃO entra
+
+| O que é | Entra? | Por quê |
+|---|---|---|
+| Devolução de venda | ❌ Não (subtrai) | Estorna receita já reconhecida |
+| Venda de ativo imobilizado | ❌ Não | Não é receita operacional |
+| Transferência entre estabelecimentos | ❌ Não | Não é venda — é movimentação interna |
+| CT-e de frete (frete incluso na NF-e) | ❌ Não | Já está no valor da mercadoria |
+| Nota cancelada | ❌ Não | Sem efeito fiscal |
+| Receita financeira | ❌ Não | Salvo instituições financeiras |
+
+> **Regra de ouro:** a receita bruta é o que você efetivamente vendeu ou prestou de serviço. 
+> O Simples não deduz impostos da base — eles já estão calculados por dentro da alíquota.
+        """)
+
+    elif tema == "CFOPs: entra ou não entra?":
+        st.markdown("""
+### CFOPs que ENTRAM na receita bruta (saídas de venda)
+
+- **5.101 / 6.101** — Venda de produção própria (indústria)
+- **5.102 / 6.102** — Venda de mercadoria adquirida para revenda ← o mais comum no comércio
+- **5.405 / 6.405** — Venda com ST (ICMS cobrado anteriormente)
+- **5.933 / 6.933** — Prestação de serviço dentro de NF-e
+- **5.124 / 6.124** — Industrialização por terceiros
+
+### CFOPs que NÃO entram
+
+- **5.352 / 6.352** — Transferência para filial ← muito comum o erro de incluir
+- **1.201 / 2.201** — Devolução de venda recebida (entrada)
+- **5.201 / 6.201** — Devolução de compra (saída) ← não é venda
+- **5.551 / 6.551** — Venda de ativo imobilizado
+- **5.910** — Remessa em bonificação (sem valor fiscal)
+
+### CFOP misto na mesma nota
+
+Uma NF-e pode ter itens com CFOP 5.102 (mercadoria) e 5.933 (serviço).  
+Nesse caso:
+1. Some os valores de cada tipo separadamente
+2. Calcule o DAS de mercadoria com o Anexo I (ou II)
+3. Calcule o DAS de serviço com o Anexo III (ou IV)
+4. Some os dois DAS
+
+> **Dica prática:** o CFOP começa com 1 ou 2 = entrada, com 5 ou 6 = saída.  
+> Saída dentro do estado = 5.xxx | Saída interestadual = 6.xxx
+        """)
+
+    elif tema == "Substituição Tributária (ST)":
+        st.markdown("""
+### O que é ST no Simples Nacional
+
+Quando uma empresa compra mercadoria e o fornecedor (indústria/atacado) já recolheu o ICMS 
+antecipadamente, a empresa não precisa pagar ICMS de novo na saída. 
+Por isso, a parcela de ICMS é **removida da alíquota efetiva do DAS** para essas vendas.
+
+### Como identificar ST no XML
+
+No XML da NF-e, em cada item `<det>`, dentro do bloco `<ICMS>`:
+
+| CSOSN (Simples) | Significa | ST? |
+|---|---|---|
+| 201 | Tributada com permissão de crédito + ST | ✅ Sim |
+| 202 | Sem permissão de crédito + ST | ✅ Sim |
+| 203 | Isenta + ST | ✅ Sim |
+| 500 | ICMS cobrado por ST anteriormente | ✅ Sim |
+| 101, 102, 400 | Tributação normal sem ST | ❌ Não |
+| 900 | Outros — analisar caso a caso | ⚠️ Verificar |
+
+### A matemática da ST
+
+```
+Alíq. efetiva normal     = 7,228%
+Parcela ICMS faixa 3     = 33,5%
+Alíq. efetiva com ST     = 7,228% × (1 − 33,5%) = 4,807%
+```
+
+### Cuidados importantes
+
+- ST é **por item** — a mesma nota pode ter itens com e sem ST
+- Só se aplica ao **Anexo I** (comércio) e **Anexo II** (indústria)
+- Serviços (III, IV, V) **não têm ST**
+- A redução só vale se o fornecedor **realmente recolheu** o ICMS-ST
+
+> **Erro mais frequente:** aplicar ST numa empresa que compra de fornecedores 
+> que não recolheram o imposto. Confirme nas notas de entrada.
+        """)
+
+    elif tema == "Fator R (Anexo III vs V)":
+        st.markdown("""
+### O que é o Fator R
+
+Para serviços que podem alternar entre Anexo III e V, a escolha depende de:
+
+```
+Fator R = Folha de Pagamento (12 meses) ÷ RBT12
+
+≥ 28% → Anexo III (alíquota menor — recompensa quem tem mais funcionários)
+< 28% → Anexo V (alíquota maior)
+```
+
+### O que entra na folha de pagamento para o Fator R
+
+| Item | Entra? |
+|---|---|
+| Salários brutos (CLT) | ✅ Sim |
+| Pró-labore dos sócios | ✅ Sim |
+| INSS patronal (20% ou Simples) | ✅ Sim |
+| FGTS (8%) | ✅ Sim |
+| 13º salário e férias proporcionais | ✅ Sim |
+| Salário líquido (já descontado) | ❌ Não — use o bruto |
+
+### Atividades que usam Fator R
+
+TI e software, engenharia, arquitetura, medicina, odontologia, psicologia, 
+fisioterapia, fonoaudiologia, contabilidade, auditoria, economia, 
+jornalismo, publicidade, veterinária.
+
+### Atividades que NÃO usam Fator R (vão direto para Anexo IV)
+
+Limpeza, vigilância, conservação, obras civis, serviços advocatícios.
+
+> **Erro mais frequente:** calcular o Fator R sem incluir o pró-labore dos sócios 
+> ou usando salário líquido em vez do bruto. Isso faz o Fator R cair abaixo de 28% 
+> indevidamente, jogando a empresa para o Anexo V (alíquota mais alta).
+        """)
+
+    elif tema == "Desenquadramento ICMS/ISS":
+        st.markdown("""
+### O que é o desenquadramento parcial
+
+A empresa continua no Simples Nacional mas o Estado ou Município a **exclui** 
+do ICMS ou ISS dentro do Simples. Ela passa a recolher esse imposto separadamente.
+
+### Desenquadramento do ICMS (Estado)
+
+- ICMS sai do DAS
+- Empresa recolhe ICMS pelo regime normal (GIA, SPED, guia SEFAZ)
+- A alíquota efetiva do DAS fica menor (sem ICMS)
+- Como saber: SEFAZ notifica; aparece no PGDAS como "ICMS fora do Simples"
+
+### Desenquadramento do ISS (Município)
+
+- ISS sai do DAS
+- Empresa recolhe ISS pela guia municipal
+- Acontece quando o município não aderiu ao Simples para ISS
+
+### Não confunda com o Anexo IV
+
+No Anexo IV, o **CPP (previdência patronal) nunca está no DAS** — 
+isso não é desenquadramento, é a regra padrão do Anexo. 
+A empresa recolhe CPP via GPS separada todos os meses.
+
+> **Como tratar no app:** marque o flag correspondente na configuração da empresa.
+> O sistema remove a parcela do tributo da alíquota e redistribui o restante proporcionalmente.
+        """)
+
+    elif tema == "Matriz e filial":
+        st.markdown("""
+### Regra fundamental do Simples Nacional
+
+**Um único DAS** é emitido pela **matriz** (CNPJ raiz), consolidando todas as filiais.
+
+### CNPJ raiz = 8 primeiros dígitos
+
+```
+Matriz:  12.345.678/0001-99  → raiz: 12345678
+Filial 1: 12.345.678/0002-70  → raiz: 12345678  ← mesmo grupo
+Filial 2: 12.345.678/0003-51  → raiz: 12345678  ← mesmo grupo
+```
+
+### O que consolida
+
+- RBT12 = soma de todas as receitas (matriz + todas as filiais)
+- DAS = calculado sobre o total consolidado
+- O PGDAS é preenchido pela matriz
+
+### O que NÃO soma
+
+- Transferências entre os estabelecimentos (CFOP 5.352/6.352)
+  → são movimentações internas, não vendas
+
+> **Erro grave:** incluir notas de transferência como venda. Inflaria o RBT12 
+> e poderia jogar a empresa para uma faixa maior, pagando mais imposto indevidamente.
+        """)
+
+    elif tema == "A fórmula do DAS explicada":
+        st.markdown("""
+### Passo 1 — RBT12 (base da faixa)
+
+Receita Bruta dos **12 meses anteriores** ao mês de apuração.  
+*Não inclui o mês atual. Some matriz + filiais.*
+
+### Passo 2 — Encontrar a faixa
+
+Com o RBT12, localiza a faixa na tabela do anexo correspondente.
+
+### Passo 3 — Alíquota efetiva
+
+```
+Alíq. efetiva = (RBT12 × Alíq. nominal − Parcela a deduzir) ÷ RBT12
+```
+
+Exemplo: RBT12 = R$ 500.000, Anexo I, Faixa 3 (9,5%, dedução R$ 13.860)
+```
+(500.000 × 0,095 − 13.860) ÷ 500.000 = 7,228%
+```
+
+O PGDAS usa **13 casas decimais** nessa divisão — por isso pequenas diferenças 
+entre sistemas são normais (centavos).
+
+### Passo 4 — DAS do mês
+
+```
+DAS = Receita do mês × Alíquota efetiva
+```
+
+Se a receita do mês foi R$ 45.000:
+```
+45.000 × 7,228% = R$ 3.252,60
+```
+
+### Passo 5 — Ajustes especiais
+
+- ST: multiplica a alíquota por (1 − % ICMS da faixa)
+- Fator R ≥ 28%: usa tabela do Anexo III
+- ICMS/ISS fora: remove a parcela do tributo
+        """)
+
+    elif tema == "Por que meu resultado difere do Domínio?":
+        st.markdown("""
+### As causas mais frequentes de diferença
+
+| Causa | Como investigar |
+|---|---|
+| Nota incluída num e excluída no outro | Compare a lista de notas nota a nota |
+| Arredondamento da alíquota efetiva | Diferença de centavos — normal |
+| ST aplicada em um e não no outro | Verifique o CSOSN dos itens |
+| Fator R com folha diferente | Compare o valor de folha informado |
+| Pró-labore esquecido na folha | Fator R menor → Anexo V indevido |
+| Transferência incluída como venda | Verifique CFOPs 5.352/6.352 |
+| CT-e de frete contado duas vezes | CT-e + frete incluso na NF-e |
+| RBT12 calculado errado | Inclui mês atual? Inclui filiais? |
+
+### Como usar o app para identificar a diferença
+
+1. Preencha o DAS do Domínio no campo "DAS Domínio" da empresa
+2. O app mostra a diferença e as causas mais prováveis
+3. Abra a lista de notas e compare com o Domínio nota a nota
+4. A diferença vai estar sempre em uma nota específica
+
+> **Filosofia:** quando há diferença, um dos dois está errado. 
+> Investigar essa diferença é o melhor exercício para aprender as regras.
+        """)
