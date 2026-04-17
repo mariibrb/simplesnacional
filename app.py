@@ -4,6 +4,7 @@ Apuração do Simples Nacional — ficheiro único para deploy (só `app.py` + `
 from __future__ import annotations
 import json
 import os
+from collections import defaultdict
 import zipfile
 import io
 import re
@@ -489,7 +490,6 @@ class ConfigEmpresa:
     nome: str = ""           # opcional (apelido); tela usa CNPJ raiz se vazio
     folha12: Optional[Decimal] = None     # para Fator R
     receita_servico_manual: Optional[Decimal] = None  # NFS-e sem XML / valores informados à mão
-    cnpjs_filiais: List[str] = field(default_factory=list)
     # Flags de desenquadramento
     icms_fora_simples: bool = False
     iss_fora_simples: bool  = False
@@ -522,6 +522,16 @@ class SegApurado:
     partilha: Dict[str, Decimal]
     passos: List[str]          # explicações passo a passo do cálculo
 
+
+@dataclass
+class EstabelecimentoResumo:
+    """Um CNPJ completo (matriz ou filial) com receita somada nos XMLs deste cliente."""
+    cnpj14: str  # 14 dígitos; vazio se linha só de serviço manual
+    papel: str
+    receita: Decimal
+    notas: int
+
+
 @dataclass
 class ResultadoEmpresa:
     nome: str
@@ -537,6 +547,7 @@ class ResultadoEmpresa:
     notas_frete: int
     notas_transferencia: int
     alertas: List[str]
+    estabelecimentos: List[EstabelecimentoResumo] = field(default_factory=list)
 
 # ── Cálculo core ──────────────────────────────────────────────────────────────
 
@@ -684,13 +695,12 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
             "empresa pode estar fora do Simples Nacional. Verifique o enquadramento."
         )
 
-    # ── Filtra notas da empresa (por CNPJ raiz ou lista explícita de filiais) ──
-    cnpjs_ok = set(cfg.cnpjs_filiais) if cfg.cnpjs_filiais else set()
+    # ── Filtra notas pelo CNPJ raiz (matriz e todas as filiais entram automaticamente) ──
+    raiz_cfg = "".join(c for c in cfg.cnpj_raiz if c.isdigit())[:8].zfill(8)
 
     def pertence(n: NotaFiscal) -> bool:
-        if cnpjs_ok:
-            return n.cnpj_emitente in cnpjs_ok
-        return n.cnpj_emitente[:8] == cfg.cnpj_raiz[:8]
+        em = "".join(c for c in n.cnpj_emitente if c.isdigit())
+        return len(em) >= 8 and em[:8] == raiz_cfg
 
     notas_emp = [n for n in notas if pertence(n) and n.tipo_op == "1"]
 
@@ -788,6 +798,40 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
     if cfg.folha12 is not None and cfg.rbt12 > 0:
         fator_r_val = (cfg.folha12 / cfg.rbt12).quantize(Decimal("0.0001"), ROUND_HALF_UP)
 
+    # ── Receita por estabelecimento (matriz / filiais) pelos XML ───────────────
+    rec_por_est: defaultdict[str, Decimal] = defaultdict(Decimal)
+    qtd_por_est: defaultdict[str, int] = defaultdict(int)
+    for n in notas_validas:
+        k = norm_cnpj14_digits(n.cnpj_emitente)
+        if not k:
+            continue
+        rec_por_est[k] += n.valor_receita
+        qtd_por_est[k] += 1
+
+    def _ord_estab(k: str) -> Tuple[int, str]:
+        if len(k) < 12:
+            return (1, k)
+        return (0 if k[8:12] == "0001" else 1, k)
+
+    est_rows: List[EstabelecimentoResumo] = [
+        EstabelecimentoResumo(
+            cnpj14=k,
+            papel=papel_matriz_filial(k),
+            receita=rec_por_est[k],
+            notas=qtd_por_est[k],
+        )
+        for k in sorted(rec_por_est.keys(), key=_ord_estab)
+    ]
+    if cfg.receita_servico_manual is not None and cfg.receita_servico_manual > 0:
+        est_rows.append(
+            EstabelecimentoResumo(
+                cnpj14="",
+                papel="Serviço sem NF-e (valor manual)",
+                receita=cfg.receita_servico_manual,
+                notas=0,
+            )
+        )
+
     return ResultadoEmpresa(
         nome=rotulo_empresa(cfg), cnpj_raiz=cfg.cnpj_raiz, rbt12=cfg.rbt12,
         fator_r=fator_r_val,
@@ -796,6 +840,7 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
         notas_validas=len(notas_validas), notas_canceladas=n_canceladas,
         notas_devolucao=n_dev, notas_frete=n_frete, notas_transferencia=n_transf,
         alertas=alertas,
+        estabelecimentos=est_rows,
     )
 
 def apurar_lote(configs: List[ConfigEmpresa], notas: List[NotaFiscal]) -> List[ResultadoEmpresa]:
@@ -1043,6 +1088,34 @@ def fmt_raiz8(r: str) -> str:
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}"
 
 
+def norm_cnpj14_digits(s: str) -> str:
+    """Normaliza para 14 dígitos (emitente nos XML)."""
+    d = "".join(c for c in (s or "") if c.isdigit())
+    if not d:
+        return ""
+    if len(d) >= 14:
+        return d[:14]
+    return d.zfill(14)
+
+
+def fmt_cnpj14(s: str) -> str:
+    """Exibe CNPJ completo: XX.XXX.XXX/XXXX-XX"""
+    x = norm_cnpj14_digits(s)
+    if len(x) != 14:
+        return s or "—"
+    return f"{x[0:2]}.{x[2:5]}.{x[5:8]}/{x[8:12]}-{x[12:14]}"
+
+
+def papel_matriz_filial(cnpj14: str) -> str:
+    """Heurística usual: ordem 0001 = matriz; demais = filial."""
+    if len(cnpj14) < 12:
+        return "Estabelecimento"
+    est = cnpj14[8:12]
+    if est == "0001":
+        return "Matriz"
+    return f"Filial (ordem {est})"
+
+
 # ── Estado de sessão ──────────────────────────────────────────────────────────
 if "configs"    not in st.session_state: st.session_state.configs    = []
 if "notas"      not in st.session_state: st.session_state.notas      = []
@@ -1089,26 +1162,16 @@ abas = st.tabs([
 # ══════════════════════════════════════════════════════════════════════════════
 with abas[0]:
     st.header("Parâmetros do cliente — CNPJ (esta sessão)")
-    st.info(
-        "**Não há banco de dados:** o que você preenche fica só na **memória desta aba** até fechar o navegador. "
-        "Mesmo assim é preciso **informar cada CNPJ (cliente)** porque o cálculo precisa saber **qual raiz** filtrar nos XMLs, "
-        "**qual RBT12 e anexos** usar nas faixas e **Fator R / flags** — isso não vem do arquivo fiscal sozinho. "
-        "**Mínimo:** CNPJ (raiz ou completo), RBT12 e pelo menos um segmento."
-    )
+    st.caption("Preencha o formulário e clique em **Adicionar cliente**. Repita o passo para incluir outro CNPJ.")
 
     with st.form("nova_empresa", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
             cnpj_input = st.text_input("CNPJ raiz (8 dígitos) ou CNPJ completo *",
-                                        help="Os 8 primeiros dígitos agrupam matriz e filiais automaticamente.")
+                                        help="Use a raiz: matriz e filiais com o mesmo início entram juntas nos XML.")
             rbt12_txt  = st.text_input("RBT12 — Receita acumulada dos 12 meses ANTERIORES (R$) *",
                                         placeholder="500.000,00",
-                                        help="Não inclua o mês atual. Some receitas de matriz + filiais.")
-            filiais_txt = st.text_area(
-                "CNPJs completos das filiais (um por linha — opcional)",
-                placeholder="12.345.678/0001-99\n12.345.678/0002-70",
-                help="Preencha só se quiser filtrar CNPJs específicos em vez de usar o CNPJ raiz.",
-            )
+                                        help="Não inclua o mês atual. Consolide matriz e filiais na mesma base.")
 
         with c2:
             folha12_txt = st.text_input(
@@ -1136,7 +1199,13 @@ with abas[0]:
             )
 
             st.markdown("**Segmentos de receita (este CNPJ)**")
-            st.caption("Um segmento por tipo de atividade. CNPJ misto = dois segmentos.")
+            st.caption(
+                "**Como saber quantos segmentos?** "
+                "Só comércio (venda de mercadoria) → **1 segmento** Mercadoria. "
+                "Só serviço → **1 segmento** Serviço. "
+                "Faz **as duas coisas** no mesmo CNPJ (vende e presta serviço) → **2 segmentos** "
+                "(um para cada tipo), porque o Simples calcula anexos diferentes para cada receita."
+            )
             n_segs = st.number_input("Quantos segmentos?", 1, 5, 1)
             segs_in = []
             for i in range(int(n_segs)):
@@ -1163,7 +1232,6 @@ with abas[0]:
             if erros:
                 for e in erros: st.error(e)
             else:
-                filiais = [cnpj14(x) for x in filiais_txt.strip().splitlines() if x.strip()]
                 rsm: Optional[Decimal] = None
                 err_manual: List[str] = []
                 try:
@@ -1182,7 +1250,6 @@ with abas[0]:
                         segmentos=segs_in,
                         folha12=parse(folha12_txt) if folha12_txt.strip() else None,
                         receita_servico_manual=rsm if rsm and rsm > 0 else None,
-                        cnpjs_filiais=filiais,
                         icms_fora_simples=icms_fora,
                         iss_fora_simples=iss_fora,
                     )
@@ -1222,8 +1289,23 @@ with abas[1]:
     st.header("Carregar arquivos XML / ZIP")
     st.info(
         "Aceita **XMLs soltos e ZIPs aninhados** (ZIP dentro de ZIP). "
-        "O sistema detecta automaticamente NF-e, NFC-e, NFS-e, CT-e e cancelamentos."
+        "O sistema detecta automaticamente NF-e, NFC-e, NFS-e, CT-e e **eventos de cancelamento** quando estão no mesmo lote."
     )
+
+    with st.expander("Cancelamentos — preciso de XML de cancelada?", expanded=False):
+        st.markdown(
+            """
+**Sem o arquivo de cancelamento, o app não “adivinha” cancelamento.**  
+Ele só marca nota como cancelada se encontrar, no lote:
+
+- o **evento de cancelamento** da NF-e (ex.: procEventoNFe / evento **110111** com a chave da nota), **ou**
+- NF-e em que já conste o cancelamento de forma que o leitor identifique.
+
+Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamento, a nota continua **válida** no cálculo — porque o sistema não tem como saber que foi cancelada depois.
+
+**O que fazer na prática:** ao baixar da SEFAZ ou do seu emissor, inclua na pasta/ZIP também os **XML de eventos** (cancelamento, carta de correção não cancela, mas cancelamento sim). Ou use o **pacote completo** do período que já traga notas + eventos juntos.
+            """
+        )
 
     if RUN_CFG.modo == "upload":
         if not _SO_WEB:
@@ -1377,6 +1459,7 @@ with abas[3]:
         }
         if r.fator_r is not None:
             linha["Fator R"] = f"{float(r.fator_r)*100:.2f}%".replace(".", ",")
+        linha["Estab. (XML)"] = sum(1 for e in r.estabelecimentos if e.cnpj14)
         linhas_resumo.append(linha)
 
     st.dataframe(pd.DataFrame(linhas_resumo), use_container_width=True)
@@ -1422,14 +1505,36 @@ with abas[3]:
             for al in r.alertas:
                 st.warning(al)
 
-            # Métricas
+            # Métricas — DAS único na raiz (PGDAS)
+            st.markdown(f"### DAS consolidado (matriz + filiais): **{br(r.das_total)}**")
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Receita total", br(r.receita_total))
-            c2.metric("DAS total",     br(r.das_total))
+            c1.metric("Receita total (apurada)", br(r.receita_total))
+            c2.metric("DAS (único na raiz)",     br(r.das_total))
             c3.metric("Notas válidas",  r.notas_validas)
             c4.metric("Devoluções",     r.notas_devolucao)
             if r.fator_r is not None:
                 st.caption(f"Fator R (folha ÷ RBT12): **{float(r.fator_r)*100:.4f}%**".replace(".", ","))
+
+            if r.estabelecimentos:
+                st.subheader("Receita por estabelecimento (matriz e filiais)")
+                st.caption(
+                    "Valores extraídos dos XML por **CNPJ completo** do emitente. "
+                    "Ordem **0001** tratada como matriz (regra usual)."
+                )
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Papel": e.papel,
+                                "CNPJ": fmt_cnpj14(e.cnpj14) if e.cnpj14 else "—",
+                                "Receita no mês": br(e.receita),
+                                "Notas": e.notas,
+                            }
+                            for e in r.estabelecimentos
+                        ]
+                    ),
+                    use_container_width=True,
+                )
 
             # Segmentos
             for seg in r.segmentos:
@@ -1461,12 +1566,11 @@ with abas[3]:
 
             # Notas desta empresa
             notas_all: List[NotaFiscal] = st.session_state.notas
-            cfg_emp = next((c for c in st.session_state.configs if c.cnpj_raiz == r.cnpj_raiz), None)
-            cnpjs_ok = set(cfg_emp.cnpjs_filiais) if cfg_emp and cfg_emp.cnpjs_filiais else set()
+            raiz_r = "".join(c for c in r.cnpj_raiz if c.isdigit())[:8].zfill(8)
 
             def pertence_emp(n: NotaFiscal) -> bool:
-                if cnpjs_ok: return n.cnpj_emitente in cnpjs_ok
-                return n.cnpj_emitente[:8] == r.cnpj_raiz[:8]
+                em = "".join(c for c in n.cnpj_emitente if c.isdigit())
+                return len(em) >= 8 and em[:8] == raiz_r
 
             notas_emp = [n for n in notas_all if pertence_emp(n) and n.tipo_op == "1"]
             with st.expander(f"🗂️ {len(notas_emp)} nota(s) desta empresa"):
