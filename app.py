@@ -197,6 +197,8 @@ class NotaFiscal:
     tipo_op: str          # "0"=entrada "1"=saída
     valor_total: Decimal
     itens: List[ItemNota]
+    numero_doc: str = ""  # nNF / nCT / nº NFS-e (leitura do XML)
+    serie_doc: str = ""   # série no ide (quando existir)
     cancelada: bool = False
     is_devolucao: bool = False
     is_transferencia: bool = False
@@ -260,6 +262,8 @@ def _parse_nfe(conteudo: bytes) -> Optional[NotaFiscal]:
             dest = _limpar(_t(dest_el,"CNPJ",ns=ns) or _t(dest_el,"CPF",ns=ns))
 
         v_total = _dec(_t(inf, "vNF", ns=ns) or _t(root,"vNF",ns=ns))
+        num_nf = _t(ide, "nNF", ns=ns) or ""
+        serie_nf = _t(ide, "serie", ns=ns) or ""
         decisoes: List[str] = []
         alertas:  List[str] = []
         itens:    List[ItemNota] = []
@@ -307,10 +311,27 @@ def _parse_nfe(conteudo: bytes) -> Optional[NotaFiscal]:
         if any(i.tem_st for i in itens):
             decisoes.append("Itens com ST detectados (CSOSN 201/202/203/500) — parcela ICMS será removida da alíquota.")
 
+        cancelada_xml = False
+        for el in root.iter():
+            loc = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+            if loc == "dhCancelamento" and (el.text or "").strip():
+                cancelada_xml = True
+                break
+        if not cancelada_xml:
+            for ip in root.findall(f".//{{{ns}}}infProt"):
+                cst = _t(ip, "cStat", ns=ns)
+                if cst in ("101", "135", "155"):
+                    cancelada_xml = True
+                    break
+        if cancelada_xml:
+            decisoes.insert(0, "XML indica nota **cancelada** (protocolo / data de cancelamento).")
+
         return NotaFiscal(
             chave=chave, modelo=modelo,
             cnpj_emitente=emit, cnpj_destinatario=dest,
             tipo_op=tp_nf, valor_total=v_total, itens=itens,
+            numero_doc=num_nf, serie_doc=serie_nf,
+            cancelada=cancelada_xml,
             is_devolucao=is_dev, is_transferencia=is_transf,
             decisoes=decisoes, alertas=alertas,
         )
@@ -331,11 +352,14 @@ def _parse_cte(conteudo: bytes) -> Optional[NotaFiscal]:
         emit  = _limpar(_t(inf,"emit/{%s}CNPJ" % ns) or _t(inf,"CNPJ",ns=ns))
         v_tot = _dec(_t(root,"vTPrest",ns=ns) or _t(root,"vTotServ",ns=ns))
         tp_nf = _t(ide,"tpNF",ns=ns) or "1"
+        n_ct = _t(ide, "nCT", ns=ns) or ""
+        ser_ct = _t(ide, "serie", ns=ns) or ""
 
         return NotaFiscal(
             chave=chave, modelo="57",
             cnpj_emitente=emit, cnpj_destinatario="",
             tipo_op=tp_nf, valor_total=v_tot,
+            numero_doc=n_ct, serie_doc=ser_ct,
             itens=[ItemNota(cfop="CTE", valor=v_tot, tem_st=False, tipo="frete")],
             is_frete_cte=True,
             decisoes=["CT-e de frete — NÃO entra na receita bruta do Simples. "
@@ -373,10 +397,14 @@ def _parse_nfse(conteudo: bytes) -> Optional[NotaFiscal]:
                 return el.text.strip()
         return ""
 
-    num      = tx("Numero","NumeroNFe","NumNFSe","nNFSe") or "0"
-    cnpj_e   = _limpar(tx("Cnpj","CNPJ","CnpjPrestador","cnpj"))
-    v_serv   = _dec(tx("ValorServicos","ValorLiquido","ValorNfse","Valor","ValorNF","vNF","ValorBruto"))
-    chave    = f"NFSE_{cnpj_e}_{num}"
+    num_key = tx("Numero", "NumeroNFe", "NumNFSe", "nNFSe") or "0"
+    ser_nfse = tx("Serie", "SerieRps", "SerieNfse", "SerieNFS-e") or ""
+    cnpj_e   = _limpar(tx("Cnpj", "CNPJ", "CnpjPrestador", "cnpj"))
+    v_serv   = _dec(tx("ValorServicos", "ValorLiquido", "ValorNfse", "Valor", "ValorNF", "vNF", "ValorBruto"))
+    chave    = f"NFSE_{cnpj_e}_{num_key}"
+    num_exib = (num_key or "").strip()
+    if num_exib == "0":
+        num_exib = ""
 
     if v_serv == 0:
         return None
@@ -385,6 +413,7 @@ def _parse_nfse(conteudo: bytes) -> Optional[NotaFiscal]:
         chave=chave, modelo="NFSe",
         cnpj_emitente=cnpj_e, cnpj_destinatario="",
         tipo_op="1", valor_total=v_serv,
+        numero_doc=num_exib, serie_doc=ser_nfse.strip(),
         itens=[ItemNota(cfop="SERV", valor=v_serv, tem_st=False, tipo="servico")],
         decisoes=[f"NFS-e municipal (namespace: '{ns or 'sem namespace'}') — "
                    "serviço entra pelo Anexo III, IV ou V conforme atividade cadastrada."],
@@ -440,23 +469,79 @@ def _detectar(conteudo: bytes) -> tuple:
 
     return ("ignorado", None)
 
+
+def chave_unica_nota(n: NotaFiscal) -> str:
+    """Chave para deduplicar: 44 dígitos da NF-e/CT-e; demais modelos usam a chave completa."""
+    d = re.sub(r"\D", "", str(n.chave or ""))
+    if len(d) >= 44:
+        return d[-44:]
+    return str(n.chave or "").strip()
+
+
+def consolidar_notas_por_chave(notas: List[NotaFiscal]) -> List[NotaFiscal]:
+    """
+    Vários XML da mesma nota (mesma chave) viram **um** registro.
+    Mantém cancelada=True se **qualquer** arquivo for cancelado ou tiver cancelamento.
+    """
+    if not notas:
+        return notas
+    idx: Dict[str, int] = {}
+    out: List[NotaFiscal] = []
+    dup_msg = "Mesma chave lida em **mais de um** arquivo XML — registros **unificados**."
+    for n in notas:
+        k = chave_unica_nota(n)
+        if not k:
+            out.append(n)
+            continue
+        if k not in idx:
+            idx[k] = len(out)
+            out.append(n)
+            continue
+        i = idx[k]
+        a = out[i]
+        a.cancelada = a.cancelada or n.cancelada
+        a.is_devolucao = a.is_devolucao or n.is_devolucao
+        a.is_transferencia = a.is_transferencia or n.is_transferencia
+        if len(n.itens) > len(a.itens):
+            a.itens = n.itens
+            a.valor_total = n.valor_total
+        elif len(n.itens) == len(a.itens) and n.valor_total != a.valor_total:
+            a.valor_total = max(a.valor_total, n.valor_total)
+        if (n.numero_doc or "").strip() and not (a.numero_doc or "").strip():
+            a.numero_doc = n.numero_doc
+        if (n.serie_doc or "").strip() and not (a.serie_doc or "").strip():
+            a.serie_doc = n.serie_doc
+        for dec in n.decisoes:
+            if dec and dec not in a.decisoes:
+                a.decisoes.append(dec)
+        for al in n.alertas:
+            if al and al not in a.alertas:
+                a.alertas.append(al)
+        if dup_msg not in a.decisoes:
+            a.decisoes.insert(0, dup_msg)
+    return out
+
+
 # ── Entrada principal ─────────────────────────────────────────────────────────
 def ler_arquivos(arquivos: List[tuple]) -> List[NotaFiscal]:
     """
     Recebe lista de (nome, bytes). Suporta ZIPs aninhados.
-    Aplica cancelamentos automaticamente.
+    Aplica cancelamentos automaticamente e **unifica** XML duplicado pela mesma chave.
     """
     notas:    List[NotaFiscal] = []
     canceladas: set            = set()
     _processar(arquivos, notas, canceladas)
 
-    # Aplica cancelamentos
+    # Aplica cancelamentos por evento / chave (chaves já normalizadas em canceladas)
     for nota in notas:
-        if nota.chave in canceladas and not nota.cancelada:
+        kn = normalizar_chave_44(nota.chave)
+        if kn in canceladas and not nota.cancelada:
             nota.cancelada = True
-            nota.decisoes.append("CANCELADA — evento de cancelamento encontrado nos arquivos enviados.")
+            msg_ev = "CANCELADA — evento de cancelamento encontrado nos arquivos enviados."
+            if msg_ev not in nota.decisoes:
+                nota.decisoes.append(msg_ev)
 
-    return notas
+    return consolidar_notas_por_chave(notas)
 
 def _processar(arquivos: List[tuple], notas: List[NotaFiscal], canceladas: set):
     for nome, conteudo in arquivos:
@@ -473,7 +558,10 @@ def _processar(arquivos: List[tuple], notas: List[NotaFiscal], canceladas: set):
             if tipo == "nota" and resultado:
                 notas.append(resultado)
             elif tipo == "cancelamento" and resultado:
-                canceladas.update(resultado)
+                for c in resultado:
+                    nc = normalizar_chave_44(c)
+                    if nc:
+                        canceladas.add(nc)
 
 # ── Motor: cálculo DAS ───────────────────────────────────────────────────────
 getcontext().prec = 60
@@ -1318,6 +1406,50 @@ def fmt_raiz8(r: str) -> str:
     return f"{d[:2]}.{d[2:5]}.{d[5:8]}"
 
 
+def rotulo_modelo_fiscal(m: str) -> str:
+    return {"55": "NF-e (55)", "65": "NFC-e (65)", "57": "CT-e (57)", "NFSe": "NFS-e"}.get(m, str(m) if m else "—")
+
+
+def chave_ordem_listagem_nota(n: NotaFiscal) -> Tuple[int, int, str]:
+    """Ordena por espécie (modelo), depois nº do documento, depois chave."""
+    mo = {"55": 0, "65": 1, "57": 2, "NFSe": 3}.get(n.modelo, 9)
+    d = (n.numero_doc or "").strip()
+    nn = int(d) if d.isdigit() else 10**9
+    return (mo, nn, n.chave)
+
+
+def resumo_numeracao_por_modelo(notas: List[NotaFiscal]) -> List[dict]:
+    """Uma linha por modelo: quantidade e faixa mín→máx do nº do documento (quando numérico)."""
+    gp: Dict[str, List[NotaFiscal]] = defaultdict(list)
+    for n in notas:
+        gp[n.modelo].append(n)
+    ordem = ("55", "65", "57", "NFSe")
+
+    def sk(m: str) -> int:
+        return ordem.index(m) if m in ordem else 99
+
+    linhas: List[dict] = []
+    for mod in sorted(gp.keys(), key=sk):
+        lst = gp[mod]
+        nums: List[int] = []
+        for n in lst:
+            d = (n.numero_doc or "").strip()
+            if d.isdigit():
+                nums.append(int(d))
+        if nums:
+            faixa_txt = f"{min(nums)} → {max(nums)}"
+        else:
+            faixa_txt = "— (sem nº numérico nos XML)"
+        linhas.append(
+            {
+                "Espécie": rotulo_modelo_fiscal(mod),
+                "Quantidade": len(lst),
+                "Faixa nº documento (mín. → máx.)": faixa_txt,
+            }
+        )
+    return linhas
+
+
 def norm_cnpj14_digits(s: str) -> str:
     """Normaliza para 14 dígitos (emitente nos XML)."""
     d = "".join(c for c in (s or "") if c.isdigit())
@@ -1420,13 +1552,30 @@ if "notas"      not in st.session_state: st.session_state.notas      = []
 if "resultados" not in st.session_state: st.session_state.resultados = []
 if "chaves_cancel_excel" not in st.session_state:
     st.session_state.chaves_cancel_excel = set()
+if "needs_recalc" not in st.session_state:
+    st.session_state.needs_recalc = False
 
 
 def definir_notas_e_planilha(notas: List[NotaFiscal]) -> None:
     st.session_state.notas = notas
+    st.session_state.needs_recalc = True
     ch = st.session_state.get("chaves_cancel_excel") or set()
     if ch:
         aplicar_cancelamentos_planilha(notas, ch)
+
+
+def executar_apuracao_automatica() -> None:
+    """Recalcula o DAS quando há cliente + XML e `needs_recalc` está ativo (sem botão manual)."""
+    cf = st.session_state.get("configs") or []
+    nt = st.session_state.get("notas") or []
+    if not cf or not nt:
+        st.session_state.resultados = []
+        return
+    if not st.session_state.get("needs_recalc", False):
+        return
+    with st.spinner("Calculando DAS..."):
+        st.session_state.resultados = apurar_lote(list(cf), list(nt))
+    st.session_state.needs_recalc = False
 
 RUN_CFG = carregar_config()
 _SO_WEB = ambiente_so_web(RUN_CFG)
@@ -1468,7 +1617,7 @@ else:
     )
 
 st.caption(
-    "📍 **Uma tela só** — role para baixo: Cliente → XMLs → Calcular → Resultados → Guia."
+    "📍 **Uma tela só** — role para baixo: Cliente → XMLs → Resultados (DAS **automático**) → Guia."
 )
 
 with st.expander("💡 Como preencher para chegar num DAS como no PGDAS (ex.: Anexo I + ST)", expanded=False):
@@ -1482,11 +1631,11 @@ with st.expander("💡 Como preencher para chegar num DAS como no PGDAS (ex.: An
 | **Anexo I**, revenda com **substituição tributária** (Seção II) | Perfil **Só comércio — Anexo I** e marque **Mercadoria com ST**. |
 | **Alíquota efetiva** (~3,29%) **≠ 7,3%** | 7,3% é a **nominal** da faixa; o DAS usa a **efetiva** `(RBT12×nominal−PD)÷RBT12` e, com ST, **retira a parcela de ICMS** — veja nominal vs efetiva na tabela de resultados. |
 
-**Ordem:** secção **1** (cliente) → **2** (XML/ZIP do mês) → **3** (Calcular) → **4** (conferir DAS e partilha).
+**Ordem:** secção **1** (cliente) → **2** (XML/ZIP do mês) → **3** (resultados e DAS, calculados **sozinhos**).
         """
     )
 
-abas = [_Painel() for _ in range(5)]
+abas = [_Painel() for _ in range(4)]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECÇÃO 1 — EMPRESAS
@@ -1615,6 +1764,7 @@ with abas[0]:
                         iss_fora_simples=iss_fora,
                     )
                     st.session_state.configs.append(nova)
+                    st.session_state.needs_recalc = True
                     st.success(f"✅ {rotulo_empresa(nova)} adicionado!")
                     st.rerun()
 
@@ -1639,7 +1789,9 @@ with abas[0]:
                 f"{segs_str}" + (f" · {' | '.join(flags)}" if flags else "")
             )
             if col2.button("🗑️", key=f"del{i}"):
-                st.session_state.configs.pop(i); st.rerun()
+                st.session_state.configs.pop(i)
+                st.session_state.needs_recalc = True
+                st.rerun()
     else:
         st.info("Nenhum CNPJ configurado ainda.")
 
@@ -1703,12 +1855,14 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
                     st.success(
                         f"**{len(chaves)}** chave(s) guardadas. Carregue os XMLs depois — as chaves serão aplicadas automaticamente."
                     )
+                st.session_state.needs_recalc = True
                 st.rerun()
     with bx2:
         if st.button("Limpar planilha de chaves"):
             st.session_state.chaves_cancel_excel = set()
             if st.session_state.notas:
                 reverter_cancelamentos_somente_planilha(st.session_state.notas)
+            st.session_state.needs_recalc = True
             st.rerun()
     if st.session_state.chaves_cancel_excel:
         st.caption(f"Chaves ativas na planilha: **{len(st.session_state.chaves_cancel_excel)}**")
@@ -1823,15 +1977,25 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
                 st.divider()
 
         with st.expander("🔍 Ver todas as notas lidas (com decisões do sistema)"):
+            st.caption("Resumo por **espécie** (faixa de numeração nos XML deste lote).")
+            st.dataframe(
+                pd.DataFrame(resumo_numeracao_por_modelo(notas)),
+                use_container_width=True,
+                hide_index=True,
+            )
             linhas = []
-            for n in notas:
+            for n in sorted(notas, key=chave_ordem_listagem_nota):
                 status = []
                 if n.cancelada:        status.append("CANCELADA")
                 if n.is_devolucao:     status.append("DEVOLUÇÃO")
                 if n.is_transferencia: status.append("TRANSFERÊNCIA")
                 if n.is_frete_cte:     status.append("FRETE (excluído)")
+                nd = (n.numero_doc or "").strip()
+                sd = (n.serie_doc or "").strip()
                 linhas.append({
-                    "Modelo":    n.modelo,
+                    "Espécie":   rotulo_modelo_fiscal(n.modelo),
+                    "Nº doc.":   nd if nd else "—",
+                    "Série":     sd if sd else "—",
                     "Emitente":  n.cnpj_emitente,
                     "Valor":     br(n.valor_total),
                     "CFOPs":     ", ".join(dict.fromkeys(n.cfops))[:50],
@@ -1839,39 +2003,26 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
                     "Status":    ", ".join(status) or "OK",
                     "Decisão":   n.decisoes[0][:80] if n.decisoes else "",
                 })
-            st.dataframe(pd.DataFrame(linhas), use_container_width=True)
+            st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECÇÃO 3 — CALCULAR
+# SECÇÃO 3 — RESULTADOS (apuração automática ao processar XML ou alterar clientes)
 # ══════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("3. Calcular DAS")
+st.subheader("3. Resultados")
+st.caption("Com **cliente** e **XML** na sessão, o DAS é calculado **automaticamente** ao processar ficheiros ou mudar o cadastro.")
 with abas[2]:
-    ne = len(st.session_state.configs)
-    nn = len(st.session_state.notas)
-    st.metric("Clientes (CNPJ) configurados", ne)
-    st.metric("XMLs carregados", nn)
-
-    if ne == 0:
-        st.warning("Informe pelo menos um CNPJ na secção **1. Cliente** acima.")
-    elif nn == 0:
-        st.warning("Carregue os XMLs na secção **2.** acima.")
-    else:
-        if st.button("🚀 Calcular DAS de todos os clientes", type="primary"):
-            with st.spinner("Calculando..."):
-                resultados = apurar_lote(st.session_state.configs, st.session_state.notas)
-                st.session_state.resultados = resultados
-            st.success("✅ Concluído! Os resultados aparecem na secção **4** abaixo.")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SECÇÃO 4 — RESULTADOS
-# ══════════════════════════════════════════════════════════════════════════════
-st.divider()
-st.subheader("4. Resultados")
-with abas[3]:
+    executar_apuracao_automatica()
     resultados: List[ResultadoEmpresa] = st.session_state.resultados
     if not resultados:
-        st.info("Quando tiver cliente + XMLs, use **Calcular DAS** na secção 3; o resumo aparece aqui.")
+        ne = len(st.session_state.configs)
+        nn = len(st.session_state.notas)
+        if ne == 0:
+            st.info("Adicione pelo menos um cliente na secção **1.** e carregue os XMLs na **2.** — o DAS aparece aqui em seguida.")
+        elif nn == 0:
+            st.info("Carregue os XMLs na secção **2.** — o DAS é calculado automaticamente quando houver cliente e ficheiros.")
+        else:
+            st.info("Aguarde o cálculo ou verifique alertas nas notas.")
     else:
 
         # ── Resumo geral ──────────────────────────────────────────────────────────
@@ -2005,31 +2156,43 @@ with abas[3]:
 
                 notas_emp = [n for n in notas_all if pertence_emp(n) and n.tipo_op == "1"]
                 with st.expander(f"🗂️ {len(notas_emp)} nota(s) desta empresa"):
+                    st.caption(
+                        "Resumo por **espécie** (quantidade e **faixa do nº do documento** lido no XML — mín. → máx.)."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(resumo_numeracao_por_modelo(notas_emp)),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
                     linhas_n = []
-                    for n in notas_emp:
+                    for n in sorted(notas_emp, key=chave_ordem_listagem_nota):
                         status = []
                         if n.cancelada:        status.append("CANCELADA")
                         if n.is_devolucao:     status.append("DEVOLUÇÃO (-)")
                         if n.is_transferencia: status.append("TRANSFERÊNCIA (excluída)")
                         if n.is_frete_cte:     status.append("FRETE (excluído)")
+                        nd = (n.numero_doc or "").strip()
+                        sd = (n.serie_doc or "").strip()
                         linhas_n.append({
-                            "Modelo":    n.modelo,
-                            "Emitente":  n.cnpj_emitente,
-                            "Valor":     br(n.valor_total),
-                            "Na receita":br(n.valor_receita),
-                            "CFOPs":     ", ".join(dict.fromkeys(n.cfops))[:50],
-                            "ST":        "Sim" if n.tem_st else "Não",
-                            "Status":    ", ".join(status) or "OK",
+                            "Espécie":    rotulo_modelo_fiscal(n.modelo),
+                            "Nº doc.":    nd if nd else "—",
+                            "Série":      sd if sd else "—",
+                            "Emitente":   n.cnpj_emitente,
+                            "Valor":      br(n.valor_total),
+                            "Na receita": br(n.valor_receita),
+                            "CFOPs":      ", ".join(dict.fromkeys(n.cfops))[:50],
+                            "ST":         "Sim" if n.tem_st else "Não",
+                            "Status":     ", ".join(status) or "OK",
                         })
-                    st.dataframe(pd.DataFrame(linhas_n), use_container_width=True)
+                    st.dataframe(pd.DataFrame(linhas_n), use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECÇÃO 5 — GUIA DE REGRAS
+# SECÇÃO 4 — GUIA DE REGRAS
 # ══════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("5. Guia de regras")
-with abas[4]:
-    st.caption("Consulte quando precisar. O resumo numérico está na secção **4. Resultados** acima.")
+st.subheader("4. Guia de regras")
+with abas[3]:
+    st.caption("Consulte quando precisar. O resumo numérico está na secção **3. Resultados** acima.")
 
     tema = st.selectbox("Escolha o tema:", [
         "O que entra na receita bruta",
@@ -2297,7 +2460,7 @@ e compara com o que quiser **no olho** ou na sua planilha.
 
 | Causa | Onde olhar |
 |---|---|
-| Nota em um sistema e não no outro | Lista de notas por CNPJ (secção **4. Resultados**) |
+| Nota em um sistema e não no outro | Lista de notas por CNPJ (secção **3. Resultados**) |
 | Arredondamento da alíquota efetiva | Diferença de centavos — frequente |
 | ST diferente | CSOSN dos itens no XML |
 | Fator R / folha | Valores informados na secção **1. Cliente** |
