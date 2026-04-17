@@ -1259,8 +1259,49 @@ def pct2(v) -> str:
     except: return "—"
 
 def parse(txt: str) -> Decimal:
-    t = txt.strip().replace("R$","").replace(" ","").replace(".","").replace(",",".")
-    return Decimal(t) if t else Decimal("0")
+    """
+    Valor monetário em texto → Decimal.
+
+    Aceita, entre outros:
+    - **256.852,76** (milhar com ponto, decimal com vírgula — Brasil)
+    - **256852,76** (só vírgula decimal)
+    - **256852.76** (ponto decimal — Excel / teclado US) — antes isto virava 25.685.276
+      porque o código antigo apagava *todos* os pontos.
+    """
+    if txt is None:
+        return Decimal("0")
+    t = str(txt).strip().replace("R$", "").replace("\u00a0", "").replace(" ", "")
+    if not t:
+        return Decimal("0")
+    t = re.sub(r"[^\d.,]", "", t)
+    if not t:
+        return Decimal("0")
+    has_comma = "," in t
+    has_dot = "." in t
+    if has_comma and has_dot:
+        # O último separador indica o decimal (BR vs US)
+        if t.rfind(",") > t.rfind("."):
+            # 1.234.567,89
+            t = t.replace(".", "").replace(",", ".")
+        else:
+            # 1,234,567.89
+            t = t.replace(",", "")
+    elif has_comma:
+        partes = t.split(",")
+        if len(partes) == 2 and len(partes[1]) <= 2 and partes[1].isdigit():
+            t = partes[0].replace(".", "") + "." + partes[1]
+        else:
+            t = t.replace(",", "")
+    else:
+        partes = t.split(".")
+        if len(partes) == 2 and len(partes[1]) <= 2 and partes[1].isdigit():
+            t = partes[0] + "." + partes[1]
+        else:
+            t = t.replace(".", "")
+    try:
+        return Decimal(t) if t else Decimal("0")
+    except Exception:
+        return Decimal("0")
 
 def cnpj8(s: str) -> str:
     return "".join(c for c in s if c.isdigit())[:8]
