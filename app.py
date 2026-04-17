@@ -223,6 +223,16 @@ class NotaFiscal:
     def cfops(self) -> List[str]:
         return [i.cfop for i in self.itens]
 
+
+def _num_doc(n: NotaFiscal) -> str:
+    """Nº do documento no XML; `getattr` evita erro com notas antigas na sessão Streamlit."""
+    return (getattr(n, "numero_doc", None) or "").strip()
+
+
+def _ser_doc(n: NotaFiscal) -> str:
+    return (getattr(n, "serie_doc", None) or "").strip()
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _limpar(s: str) -> str:
     return re.sub(r"\D", "", str(s or ""))
@@ -472,7 +482,9 @@ def _detectar(conteudo: bytes) -> tuple:
 
 def chave_unica_nota(n: NotaFiscal) -> str:
     """Chave para deduplicar: 44 dígitos da NF-e/CT-e; demais modelos usam a chave completa."""
-    d = re.sub(r"\D", "", str(n.chave or ""))
+    if n is None:
+        return ""
+    d = re.sub(r"\D", "", str(getattr(n, "chave", "") or ""))
     if len(d) >= 44:
         return d[-44:]
     return str(n.chave or "").strip()
@@ -489,6 +501,8 @@ def consolidar_notas_por_chave(notas: List[NotaFiscal]) -> List[NotaFiscal]:
     out: List[NotaFiscal] = []
     dup_msg = "Mesma chave lida em **mais de um** arquivo XML — registros **unificados**."
     for n in notas:
+        if n is None:
+            continue
         k = chave_unica_nota(n)
         if not k:
             out.append(n)
@@ -507,10 +521,10 @@ def consolidar_notas_por_chave(notas: List[NotaFiscal]) -> List[NotaFiscal]:
             a.valor_total = n.valor_total
         elif len(n.itens) == len(a.itens) and n.valor_total != a.valor_total:
             a.valor_total = max(a.valor_total, n.valor_total)
-        if (n.numero_doc or "").strip() and not (a.numero_doc or "").strip():
-            a.numero_doc = n.numero_doc
-        if (n.serie_doc or "").strip() and not (a.serie_doc or "").strip():
-            a.serie_doc = n.serie_doc
+        if _num_doc(n) and not _num_doc(a):
+            setattr(a, "numero_doc", _num_doc(n))
+        if _ser_doc(n) and not _ser_doc(a):
+            setattr(a, "serie_doc", _ser_doc(n))
         for dec in n.decisoes:
             if dec and dec not in a.decisoes:
                 a.decisoes.append(dec)
@@ -1412,17 +1426,21 @@ def rotulo_modelo_fiscal(m: str) -> str:
 
 def chave_ordem_listagem_nota(n: NotaFiscal) -> Tuple[int, int, str]:
     """Ordena por espécie (modelo), depois nº do documento, depois chave."""
-    mo = {"55": 0, "65": 1, "57": 2, "NFSe": 3}.get(n.modelo, 9)
-    d = (n.numero_doc or "").strip()
+    if n is None:
+        return (99, 10**9, "")
+    mo = {"55": 0, "65": 1, "57": 2, "NFSe": 3}.get(getattr(n, "modelo", "") or "", 9)
+    d = _num_doc(n)
     nn = int(d) if d.isdigit() else 10**9
-    return (mo, nn, n.chave)
+    return (mo, nn, getattr(n, "chave", "") or "")
 
 
 def resumo_numeracao_por_modelo(notas: List[NotaFiscal]) -> List[dict]:
     """Uma linha por modelo: quantidade e faixa mín→máx do nº do documento (quando numérico)."""
     gp: Dict[str, List[NotaFiscal]] = defaultdict(list)
     for n in notas:
-        gp[n.modelo].append(n)
+        if n is None:
+            continue
+        gp[getattr(n, "modelo", "") or "?"].append(n)
     ordem = ("55", "65", "57", "NFSe")
 
     def sk(m: str) -> int:
@@ -1433,7 +1451,9 @@ def resumo_numeracao_por_modelo(notas: List[NotaFiscal]) -> List[dict]:
         lst = gp[mod]
         nums: List[int] = []
         for n in lst:
-            d = (n.numero_doc or "").strip()
+            if n is None:
+                continue
+            d = _num_doc(n)
             if d.isdigit():
                 nums.append(int(d))
         if nums:
@@ -1990,8 +2010,8 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
                 if n.is_devolucao:     status.append("DEVOLUÇÃO")
                 if n.is_transferencia: status.append("TRANSFERÊNCIA")
                 if n.is_frete_cte:     status.append("FRETE (excluído)")
-                nd = (n.numero_doc or "").strip()
-                sd = (n.serie_doc or "").strip()
+                nd = _num_doc(n)
+                sd = _ser_doc(n)
                 linhas.append({
                     "Espécie":   rotulo_modelo_fiscal(n.modelo),
                     "Nº doc.":   nd if nd else "—",
@@ -2171,8 +2191,8 @@ with abas[2]:
                         if n.is_devolucao:     status.append("DEVOLUÇÃO (-)")
                         if n.is_transferencia: status.append("TRANSFERÊNCIA (excluída)")
                         if n.is_frete_cte:     status.append("FRETE (excluído)")
-                        nd = (n.numero_doc or "").strip()
-                        sd = (n.serie_doc or "").strip()
+                        nd = _num_doc(n)
+                        sd = _ser_doc(n)
                         linhas_n.append({
                             "Espécie":    rotulo_modelo_fiscal(n.modelo),
                             "Nº doc.":    nd if nd else "—",
