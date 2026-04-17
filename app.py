@@ -506,6 +506,34 @@ def rotulo_empresa(cfg: ConfigEmpresa) -> str:
     return f"Raiz {r}"
 
 
+def segmentos_perfil_rapido(perfil_id: str, st_comercio: bool) -> List[dict]:
+    """Monta `segmentos` a partir do perfil escolhido no formulário rápido."""
+    if perfil_id == "com_i":
+        return [{"tipo": "mercadoria", "anexo": "I", "tem_st": st_comercio}]
+    if perfil_id == "srv_iii":
+        return [{"tipo": "servico", "anexo": "III", "tem_st": False}]
+    if perfil_id == "srv_iv":
+        return [{"tipo": "servico", "anexo": "IV", "tem_st": False}]
+    if perfil_id == "srv_v":
+        return [{"tipo": "servico", "anexo": "V", "tem_st": False}]
+    if perfil_id == "mix_i_iii":
+        return [
+            {"tipo": "mercadoria", "anexo": "I", "tem_st": st_comercio},
+            {"tipo": "servico", "anexo": "III", "tem_st": False},
+        ]
+    return []
+
+
+OPTS_PERFIL_RAPIDO: List[Tuple[str, str]] = [
+    ("com_i", "Só comércio / revenda — Anexo I"),
+    ("srv_iii", "Só serviços — Anexo III"),
+    ("srv_iv", "Só serviços — Anexo IV"),
+    ("srv_v", "Só serviços — Anexo V"),
+    ("mix_i_iii", "Comércio (I) + serviços (III) no mesmo CNPJ"),
+    ("adv", "Personalizado (vários segmentos à mão)"),
+]
+
+
 # ── Resultado ─────────────────────────────────────────────────────────────────
 @dataclass
 class SegApurado:
@@ -1201,11 +1229,22 @@ def definir_notas_e_planilha(notas: List[NotaFiscal]) -> None:
 RUN_CFG = carregar_config()
 _SO_WEB = ambiente_so_web(RUN_CFG)
 
+
+class _Painel:
+    """Substitui o contexto de `st.tabs()` por um bloco vazio — tudo numa única página (sem barra de abas)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
 # ── Barra lateral ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("##### Simples Nacional")
     if _SO_WEB:
-        st.caption("Envie os XML ou ZIP na aba **Carregar XMLs**.")
+        st.caption("Envie os XML ou ZIP na secção **2. Carregar XMLs** (role a página).")
     else:
         st.caption(RUN_CFG.perfil_execucao)
         st.caption(f"XML: **{RUN_CFG.modo_label}**")
@@ -1218,7 +1257,7 @@ with st.sidebar:
 st.title("📊 Apuração do Simples Nacional")
 if _SO_WEB:
     st.caption(
-        "Escritório Contábil · Os dados ficam nesta sessão do navegador até você fechar a aba."
+        "Escritório Contábil · Os dados ficam nesta sessão do navegador até fechar esta janela."
     )
 else:
     st.caption(
@@ -1226,88 +1265,130 @@ else:
         f"Origem XML: **{RUN_CFG.modo_label}** (`config_app.json`, secrets ou `SN_MODO`)"
     )
 
-abas = st.tabs([
-    "1️⃣ Cliente (CNPJ)",
-    "2️⃣ Carregar XMLs",
-    "3️⃣ Calcular",
-    "4️⃣ Resultados",
-    "📚 Guia de regras",
-])
+st.caption(
+    "📍 **Uma tela só** — role para baixo: Cliente → XMLs → Calcular → Resultados → Guia."
+)
+
+with st.expander("💡 Como preencher para chegar num DAS como no PGDAS (ex.: Anexo I + ST)", expanded=False):
+    st.markdown(
+        """
+| No PGDAS / documento | O que fazer neste app |
+|---|---|
+| **CNPJ** | Informe a **raiz (8 dígitos)** ou CNPJ completo (matriz e filiais do mesmo grupo entram juntas). |
+| **RBT12** (12 meses anteriores ao mês da apuração) | Mesmo valor do PGDAS, ex.: `256852,76` — **não** é a receita só do mês. |
+| **RPA / receita do período** | Vem da **soma dos XML** que você envia (saídas válidas do mês). |
+| **Anexo I**, revenda com **substituição tributária** (Seção II) | Perfil **Só comércio — Anexo I** e marque **Mercadoria com ST**. |
+| **Alíquota efetiva** (~3,29%) **≠ 7,3%** | 7,3% é a **nominal** da faixa; o DAS usa a **efetiva** `(RBT12×nominal−PD)÷RBT12` e, com ST, **retira a parcela de ICMS** — veja nominal vs efetiva na tabela de resultados. |
+
+**Ordem:** secção **1** (cliente) → **2** (XML/ZIP do mês) → **3** (Calcular) → **4** (conferir DAS e partilha).
+        """
+    )
+
+abas = [_Painel() for _ in range(5)]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ABA 1 — EMPRESAS
+# SECÇÃO 1 — EMPRESAS
 # ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.subheader("1. Cliente")
+st.caption("Obrigatório: **CNPJ** e **RBT12**. Escolha o **perfil** — só abra *Mais opções* se precisar.")
 with abas[0]:
-    st.header("Parâmetros do cliente — CNPJ (esta sessão)")
-    st.caption("Preencha o formulário e clique em **Adicionar cliente**. Repita o passo para incluir outro CNPJ.")
 
     with st.form("nova_empresa", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
-            cnpj_input = st.text_input("CNPJ raiz (8 dígitos) ou CNPJ completo *",
-                                        help="Use a raiz: matriz e filiais com o mesmo início entram juntas nos XML.")
-            rbt12_txt  = st.text_input("RBT12 — Receita acumulada dos 12 meses ANTERIORES (R$) *",
-                                        placeholder="500.000,00",
-                                        help="Não inclua o mês atual. Consolide matriz e filiais na mesma base.")
-
+            cnpj_input = st.text_input(
+                "CNPJ (raiz 8 dígitos ou completo) *",
+                help="Matriz e filiais com a mesma raiz entram juntas nos XML.",
+            )
+            rbt12_txt = st.text_input(
+                "RBT12 — 12 meses anteriores (R$) *",
+                placeholder="256852,76",
+                help="Igual ao PGDAS: receita acumulada dos 12 meses antes do mês que está apurando.",
+            )
         with c2:
-            folha12_txt = st.text_input(
-                "Folha de pagamento — 12 meses (R$)",
-                placeholder="0,00",
-                help="Obrigatório para Anexo V. Inclua: salários brutos + pró-labore + INSS patronal + FGTS.",
+            perfil_id = st.selectbox(
+                "Perfil *",
+                [x[0] for x in OPTS_PERFIL_RAPIDO],
+                format_func=lambda k: dict(OPTS_PERFIL_RAPIDO)[k],
+                index=0,
+                help="Define anexos e quantos segmentos. Troque só se a empresa não for o caso mais comum.",
             )
-            icms_fora = st.checkbox(
-                "ICMS desenquadrado do Simples (recolhe ICMS separado pelo Estado)",
-                help="Marque se o Estado excluiu esta empresa do ICMS do Simples Nacional.",
-            )
-            iss_fora = st.checkbox(
-                "ISS fora do Simples (município não aderiu ou empresa excluída)",
-                help="Marque se o ISS é recolhido separadamente pela guia municipal.",
-            )
+            st_comercio = False
+            if perfil_id in ("com_i", "mix_i_iii"):
+                st_comercio = st.checkbox(
+                    "Mercadoria com **substituição tributária (ST)**",
+                    value=False,
+                    help="Marque se as vendas de mercadoria entram na Seção II do PGDAS (ICMS-ST).",
+                )
 
-            receita_serv_txt = st.text_input(
-                "Receita de serviços **sem XML** (R$) — opcional",
-                placeholder="0,00",
-                help=(
-                    "NFS-e que não entram como arquivo (papel, outro sistema, etc.). "
-                    "O valor **soma** ao que vier de XML para o **primeiro segmento Serviço** "
-                    "(ex.: Anexo III — o anexo é o que você escolher abaixo em Serviço)."
-                ),
-            )
-
-            st.markdown("**Segmentos de receita (este CNPJ)**")
-            st.caption(
-                "**Como saber quantos segmentos?** "
-                "Só comércio (venda de mercadoria) → **1 segmento** Mercadoria. "
-                "Só serviço → **1 segmento** Serviço. "
-                "Faz **as duas coisas** no mesmo CNPJ (vende e presta serviço) → **2 segmentos** "
-                "(um para cada tipo), porque o Simples calcula anexos diferentes para cada receita."
-            )
-            n_segs = st.number_input("Quantos segmentos?", 1, 5, 1)
-            segs_in = []
+        if perfil_id == "adv":
+            st.markdown("**Segmentos (personalizado)**")
+            n_segs = st.number_input("Quantos segmentos?", 1, 5, 1, key="n_segs_adv")
+            segs_preview: List[dict] = []
             for i in range(int(n_segs)):
                 ca, cb, cc = st.columns(3)
-                tipo  = ca.selectbox("Tipo",   ["mercadoria","servico"],
-                                     key=f"t{i}", format_func=lambda x: x.capitalize())
-                anexo = cb.selectbox("Anexo",  list(ANEXOS_DESC.keys()),
-                                     key=f"a{i}", format_func=lambda x: ANEXOS_DESC[x])
-                st_cb = cc.checkbox("ST?", key=f"s{i}",
-                                    help="Marque se as mercadorias são compradas com ICMS-ST já pago.")
-                segs_in.append({"tipo":tipo,"anexo":anexo,"tem_st":st_cb})
+                tipo = ca.selectbox(
+                    "Tipo",
+                    ["mercadoria", "servico"],
+                    key=f"t{i}",
+                    format_func=lambda x: x.capitalize(),
+                )
+                anexo = cb.selectbox(
+                    "Anexo",
+                    list(ANEXOS_DESC.keys()),
+                    key=f"a{i}",
+                    format_func=lambda x: ANEXOS_DESC[x],
+                )
+                st_cb = cc.checkbox("ST?", key=f"s{i}", help="Só para mercadoria Anexo I ou II.")
+                segs_preview.append({"tipo": tipo, "anexo": anexo, "tem_st": st_cb})
+        else:
+            segs_preview = []
+
+        with st.expander("Mais opções (só se precisar)", expanded=False):
+            nome_cli = st.text_input("Nome / apelido do cliente (opcional)", placeholder="Ex.: Loja Centro")
+            folha12_txt = st.text_input(
+                "Folha 12 meses (R$) — para Anexo **V** ou Fator R",
+                placeholder="0,00",
+                help="Anexo V: necessário para o Fator R. Comércio puro costuma ficar em branco.",
+            )
+            icms_fora = st.checkbox("ICMS **fora** do Simples (desenquadramento estadual)")
+            iss_fora = st.checkbox("ISS **fora** do Simples (guia municipal)")
+            receita_serv_txt = st.text_input(
+                "Serviços **sem** XML (R$)",
+                placeholder="0,00",
+                help="Soma ao segmento de serviço (ex.: NFS-e em papel).",
+            )
 
         salvar = st.form_submit_button("➕ Adicionar cliente", type="primary")
         if salvar:
-            erros = []
-            if not cnpj_input.strip(): erros.append("Informe o CNPJ.")
+            erros: List[str] = []
+            if not cnpj_input.strip():
+                erros.append("Informe o CNPJ.")
             try:
                 rbt12 = parse(rbt12_txt)
                 assert rbt12 > 0
-            except:
+            except Exception:
                 erros.append("RBT12 inválido ou zerado.")
                 rbt12 = Decimal("0")
 
+            if perfil_id == "adv":
+                segs_in = segs_preview
+            else:
+                segs_in = segmentos_perfil_rapido(perfil_id, st_comercio)
+
+            folha12: Optional[Decimal] = None
+            try:
+                folha12 = parse(folha12_txt) if folha12_txt.strip() else None
+            except Exception:
+                erros.append("Valor da folha inválido.")
+
+            if perfil_id == "srv_v" and (folha12 is None or folha12 <= 0):
+                erros.append("Para **Anexo V**, informe a **Folha 12 meses** em *Mais opções* (ou use personalizado).")
+
             if erros:
-                for e in erros: st.error(e)
+                for e in erros:
+                    st.error(e)
             else:
                 rsm: Optional[Decimal] = None
                 err_manual: List[str] = []
@@ -1322,10 +1403,11 @@ with abas[0]:
                         st.error(e)
                 else:
                     nova = ConfigEmpresa(
+                        nome=(nome_cli or "").strip(),
                         cnpj_raiz=cnpj8(cnpj_input),
                         rbt12=rbt12,
                         segmentos=segs_in,
-                        folha12=parse(folha12_txt) if folha12_txt.strip() else None,
+                        folha12=folha12,
                         receita_servico_manual=rsm if rsm and rsm > 0 else None,
                         icms_fora_simples=icms_fora,
                         iss_fora_simples=iss_fora,
@@ -1360,10 +1442,11 @@ with abas[0]:
         st.info("Nenhum CNPJ configurado ainda.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ABA 2 — CARREGAR XMLs
+# SECÇÃO 2 — CARREGAR XMLs
 # ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.subheader("2. Carregar XMLs e cancelamentos")
 with abas[1]:
-    st.header("Carregar arquivos XML / ZIP")
     st.info(
         "Aceita **XMLs soltos e ZIPs aninhados** (ZIP dentro de ZIP). "
         "O sistema detecta automaticamente NF-e, NFC-e, NFS-e, CT-e e **eventos de cancelamento** quando estão no mesmo lote."
@@ -1532,193 +1615,194 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
             st.dataframe(pd.DataFrame(linhas), use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ABA 3 — CALCULAR
+# SECÇÃO 3 — CALCULAR
 # ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.subheader("3. Calcular DAS")
 with abas[2]:
-    st.header("Calcular DAS")
-
     ne = len(st.session_state.configs)
     nn = len(st.session_state.notas)
     st.metric("Clientes (CNPJ) configurados", ne)
     st.metric("XMLs carregados", nn)
 
     if ne == 0:
-        st.warning("Informe pelo menos um CNPJ na aba 1.")
+        st.warning("Informe pelo menos um CNPJ na secção **1. Cliente** acima.")
     elif nn == 0:
-        st.warning("Carregue os XMLs na aba 2.")
+        st.warning("Carregue os XMLs na secção **2.** acima.")
     else:
         if st.button("🚀 Calcular DAS de todos os clientes", type="primary"):
             with st.spinner("Calculando..."):
                 resultados = apurar_lote(st.session_state.configs, st.session_state.notas)
                 st.session_state.resultados = resultados
-            st.success("✅ Concluído! Veja os resultados na aba 4.")
+            st.success("✅ Concluído! Os resultados aparecem na secção **4** abaixo.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ABA 4 — RESULTADOS
+# SECÇÃO 4 — RESULTADOS
 # ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.subheader("4. Resultados")
 with abas[3]:
-    st.header("Resultados")
-
     resultados: List[ResultadoEmpresa] = st.session_state.resultados
     if not resultados:
-        st.info("Execute o cálculo na aba 3.")
-        st.stop()
-
-    # ── Resumo geral ──────────────────────────────────────────────────────────
-    st.subheader("Resumo por CNPJ")
-    linhas_resumo = []
-    for r in resultados:
-        linha = {
-            "CNPJ raiz":     fmt_raiz8(r.cnpj_raiz),
-            "Cliente":       r.nome,
-            "RBT12":         br(r.rbt12),
-            "Notas válidas": r.notas_validas,
-            "Canceladas":    r.notas_canceladas,
-            "Devoluções":    r.notas_devolucao,
-            "Receita total": br(r.receita_total),
-            "DAS total":     br(r.das_total),
-        }
-        if r.fator_r is not None:
-            linha["Fator R"] = f"{float(r.fator_r)*100:.2f}%".replace(".", ",")
-        linha["Estab. (XML)"] = sum(1 for e in r.estabelecimentos if e.cnpj14)
-        linhas_resumo.append(linha)
-
-    st.dataframe(pd.DataFrame(linhas_resumo), use_container_width=True)
-    st.metric("Total DAS (todos os clientes)", br(sum(r.das_total for r in resultados)))
-
-    st.subheader("Detalhe por CNPJ, segmento e alíquota")
-    st.caption(
-        "Uma linha por combinação de tipo de receita + anexo usado no cálculo: faixa, alíquota nominal, "
-        "alíquota efetiva (PGDAS), receita e DAS do segmento."
-    )
-    linhas_det = []
-    for r in resultados:
-        for seg in r.segmentos:
-            linhas_det.append({
-                "CNPJ raiz":        fmt_raiz8(r.cnpj_raiz),
-                "Tipo receita":     seg.tipo,
-                "Anexo cadastro":   seg.anexo,
-                "Anexo efetivo":    seg.anexo_efetivo,
-                "Atividade (tabela)": ANEXOS_DESC.get(seg.anexo_efetivo, ""),
-                "ST":               "Sim" if seg.tem_st else "Não",
-                "Faixa RBT12":      f"{seg.faixa}ª",
-                "Alíq. nominal":    pct(seg.aliq_nominal),
-                "Parcela deduzir":  br(seg.deducao),
-                "Alíq. efetiva":    pct(seg.aliq_efetiva),
-                "Receita segmento": br(seg.receita),
-                "DAS segmento":     br(seg.das),
-            })
-    if linhas_det:
-        st.dataframe(pd.DataFrame(linhas_det), use_container_width=True)
+        st.info("Quando tiver cliente + XMLs, use **Calcular DAS** na secção 3; o resumo aparece aqui.")
     else:
-        st.warning("Nenhum segmento apurado — verifique segmentos na aba 1 e XMLs na aba 2.")
 
-    st.divider()
-
-    # ── Detalhe por cliente ───────────────────────────────────────────────────
-    for r in resultados:
-
-        titulo = f"📋 {r.nome}  —  DAS {br(r.das_total)}"
-
-        with st.expander(titulo, expanded=False):
-
-            # Alertas
-            for al in r.alertas:
-                st.warning(al)
-
-            # Métricas — DAS único na raiz (PGDAS)
-            st.markdown(f"### DAS consolidado (matriz + filiais): **{br(r.das_total)}**")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Receita total (apurada)", br(r.receita_total))
-            c2.metric("DAS (único na raiz)",     br(r.das_total))
-            c3.metric("Notas válidas",  r.notas_validas)
-            c4.metric("Devoluções",     r.notas_devolucao)
+        # ── Resumo geral ──────────────────────────────────────────────────────────
+        st.subheader("Resumo por CNPJ")
+        linhas_resumo = []
+        for r in resultados:
+            linha = {
+                "CNPJ raiz":     fmt_raiz8(r.cnpj_raiz),
+                "Cliente":       r.nome,
+                "RBT12":         br(r.rbt12),
+                "Notas válidas": r.notas_validas,
+                "Canceladas":    r.notas_canceladas,
+                "Devoluções":    r.notas_devolucao,
+                "Receita total": br(r.receita_total),
+                "DAS total":     br(r.das_total),
+            }
             if r.fator_r is not None:
-                st.caption(f"Fator R (folha ÷ RBT12): **{float(r.fator_r)*100:.4f}%**".replace(".", ","))
+                linha["Fator R"] = f"{float(r.fator_r)*100:.2f}%".replace(".", ",")
+            linha["Estab. (XML)"] = sum(1 for e in r.estabelecimentos if e.cnpj14)
+            linhas_resumo.append(linha)
 
-            if r.estabelecimentos:
-                st.subheader("Receita por estabelecimento (matriz e filiais)")
-                st.caption(
-                    "Valores extraídos dos XML por **CNPJ completo** do emitente. "
-                    "Ordem **0001** tratada como matriz (regra usual)."
-                )
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            {
-                                "Papel": e.papel,
-                                "CNPJ": fmt_cnpj14(e.cnpj14) if e.cnpj14 else "—",
-                                "Receita no mês": br(e.receita),
-                                "Notas": e.notas,
-                            }
-                            for e in r.estabelecimentos
-                        ]
-                    ),
-                    use_container_width=True,
-                )
+        st.dataframe(pd.DataFrame(linhas_resumo), use_container_width=True)
+        st.metric("Total DAS (todos os clientes)", br(sum(r.das_total for r in resultados)))
 
-            # Segmentos
+        st.subheader("Detalhe por CNPJ, segmento e alíquota")
+        st.caption(
+            "Uma linha por combinação de tipo de receita + anexo usado no cálculo: faixa, alíquota nominal, "
+            "alíquota efetiva (PGDAS), receita e DAS do segmento."
+        )
+        linhas_det = []
+        for r in resultados:
             for seg in r.segmentos:
-                st.markdown(f"---")
-                st.markdown(
-                    f"**{seg.tipo} · Anexo {seg.anexo_efetivo}**"
-                    + (" *(Fator R aplicado)*" if seg.anexo != seg.anexo_efetivo else "")
-                    + (" · (ST)" if seg.tem_st else "")
-                )
-                sc1, sc2, sc3, sc4 = st.columns(4)
-                sc1.metric("Receita do segmento", br(seg.receita))
-                sc2.metric(f"Faixa",              f"{seg.faixa}ª")
-                sc3.metric("Alíq. efetiva",       pct(seg.aliq_efetiva))
-                sc4.metric("DAS do segmento",     br(seg.das))
+                linhas_det.append({
+                    "CNPJ raiz":        fmt_raiz8(r.cnpj_raiz),
+                    "Tipo receita":     seg.tipo,
+                    "Anexo cadastro":   seg.anexo,
+                    "Anexo efetivo":    seg.anexo_efetivo,
+                    "Atividade (tabela)": ANEXOS_DESC.get(seg.anexo_efetivo, ""),
+                    "ST":               "Sim" if seg.tem_st else "Não",
+                    "Faixa RBT12":      f"{seg.faixa}ª",
+                    "Alíq. nominal":    pct(seg.aliq_nominal),
+                    "Parcela deduzir":  br(seg.deducao),
+                    "Alíq. efetiva":    pct(seg.aliq_efetiva),
+                    "Receita segmento": br(seg.receita),
+                    "DAS segmento":     br(seg.das),
+                })
+        if linhas_det:
+            st.dataframe(pd.DataFrame(linhas_det), use_container_width=True)
+        else:
+            st.warning("Nenhum segmento apurado — verifique segmentos na secção 1 e XMLs na secção 2.")
 
-                # Passo a passo do cálculo — PEDAGÓGICO
-                with st.expander("📖 Como o sistema chegou nesse valor (passo a passo)"):
-                    for i, passo in enumerate(seg.passos, 1):
-                        st.markdown(f"**Passo {i}:** {passo}")
+        st.divider()
 
-                # Partilha
-                with st.expander("💰 Partilha por tributo"):
-                    df_p = pd.DataFrame([
-                        {"Tributo": t, "% na partilha": pct2(p/seg.das) if seg.das > 0 else "0%",
-                         "Valor": br(p)}
-                        for t in TRIBUTOS_ORDEM if (p := seg.partilha.get(t)) is not None
-                    ])
-                    st.table(df_p)
+        # ── Detalhe por cliente ───────────────────────────────────────────────────
+        for r in resultados:
 
-            # Notas desta empresa
-            notas_all: List[NotaFiscal] = st.session_state.notas
-            raiz_r = "".join(c for c in r.cnpj_raiz if c.isdigit())[:8].zfill(8)
+            titulo = f"📋 {r.nome}  —  DAS {br(r.das_total)}"
 
-            def pertence_emp(n: NotaFiscal) -> bool:
-                em = "".join(c for c in n.cnpj_emitente if c.isdigit())
-                return len(em) >= 8 and em[:8] == raiz_r
+            with st.expander(titulo, expanded=False):
 
-            notas_emp = [n for n in notas_all if pertence_emp(n) and n.tipo_op == "1"]
-            with st.expander(f"🗂️ {len(notas_emp)} nota(s) desta empresa"):
-                linhas_n = []
-                for n in notas_emp:
-                    status = []
-                    if n.cancelada:        status.append("CANCELADA")
-                    if n.is_devolucao:     status.append("DEVOLUÇÃO (-)")
-                    if n.is_transferencia: status.append("TRANSFERÊNCIA (excluída)")
-                    if n.is_frete_cte:     status.append("FRETE (excluído)")
-                    linhas_n.append({
-                        "Modelo":    n.modelo,
-                        "Emitente":  n.cnpj_emitente,
-                        "Valor":     br(n.valor_total),
-                        "Na receita":br(n.valor_receita),
-                        "CFOPs":     ", ".join(dict.fromkeys(n.cfops))[:50],
-                        "ST":        "Sim" if n.tem_st else "Não",
-                        "Status":    ", ".join(status) or "OK",
-                    })
-                st.dataframe(pd.DataFrame(linhas_n), use_container_width=True)
+                # Alertas
+                for al in r.alertas:
+                    st.warning(al)
+
+                # Métricas — DAS único na raiz (PGDAS)
+                st.markdown(f"### DAS consolidado (matriz + filiais): **{br(r.das_total)}**")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Receita total (apurada)", br(r.receita_total))
+                c2.metric("DAS (único na raiz)",     br(r.das_total))
+                c3.metric("Notas válidas",  r.notas_validas)
+                c4.metric("Devoluções",     r.notas_devolucao)
+                if r.fator_r is not None:
+                    st.caption(f"Fator R (folha ÷ RBT12): **{float(r.fator_r)*100:.4f}%**".replace(".", ","))
+
+                if r.estabelecimentos:
+                    st.subheader("Receita por estabelecimento (matriz e filiais)")
+                    st.caption(
+                        "Valores extraídos dos XML por **CNPJ completo** do emitente. "
+                        "Ordem **0001** tratada como matriz (regra usual)."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Papel": e.papel,
+                                    "CNPJ": fmt_cnpj14(e.cnpj14) if e.cnpj14 else "—",
+                                    "Receita no mês": br(e.receita),
+                                    "Notas": e.notas,
+                                }
+                                for e in r.estabelecimentos
+                            ]
+                        ),
+                        use_container_width=True,
+                    )
+
+                # Segmentos
+                for seg in r.segmentos:
+                    st.markdown(f"---")
+                    st.markdown(
+                        f"**{seg.tipo} · Anexo {seg.anexo_efetivo}**"
+                        + (" *(Fator R aplicado)*" if seg.anexo != seg.anexo_efetivo else "")
+                        + (" · (ST)" if seg.tem_st else "")
+                    )
+                    sc1, sc2, sc3, sc4 = st.columns(4)
+                    sc1.metric("Receita do segmento", br(seg.receita))
+                    sc2.metric(f"Faixa",              f"{seg.faixa}ª")
+                    sc3.metric("Alíq. efetiva",       pct(seg.aliq_efetiva))
+                    sc4.metric("DAS do segmento",     br(seg.das))
+
+                    # Passo a passo do cálculo — PEDAGÓGICO
+                    with st.expander("📖 Como o sistema chegou nesse valor (passo a passo)"):
+                        for i, passo in enumerate(seg.passos, 1):
+                            st.markdown(f"**Passo {i}:** {passo}")
+
+                    # Partilha
+                    with st.expander("💰 Partilha por tributo"):
+                        df_p = pd.DataFrame([
+                            {"Tributo": t, "% na partilha": pct2(p/seg.das) if seg.das > 0 else "0%",
+                             "Valor": br(p)}
+                            for t in TRIBUTOS_ORDEM if (p := seg.partilha.get(t)) is not None
+                        ])
+                        st.table(df_p)
+
+                # Notas desta empresa
+                notas_all: List[NotaFiscal] = st.session_state.notas
+                raiz_r = "".join(c for c in r.cnpj_raiz if c.isdigit())[:8].zfill(8)
+
+                def pertence_emp(n: NotaFiscal) -> bool:
+                    em = "".join(c for c in n.cnpj_emitente if c.isdigit())
+                    return len(em) >= 8 and em[:8] == raiz_r
+
+                notas_emp = [n for n in notas_all if pertence_emp(n) and n.tipo_op == "1"]
+                with st.expander(f"🗂️ {len(notas_emp)} nota(s) desta empresa"):
+                    linhas_n = []
+                    for n in notas_emp:
+                        status = []
+                        if n.cancelada:        status.append("CANCELADA")
+                        if n.is_devolucao:     status.append("DEVOLUÇÃO (-)")
+                        if n.is_transferencia: status.append("TRANSFERÊNCIA (excluída)")
+                        if n.is_frete_cte:     status.append("FRETE (excluído)")
+                        linhas_n.append({
+                            "Modelo":    n.modelo,
+                            "Emitente":  n.cnpj_emitente,
+                            "Valor":     br(n.valor_total),
+                            "Na receita":br(n.valor_receita),
+                            "CFOPs":     ", ".join(dict.fromkeys(n.cfops))[:50],
+                            "ST":        "Sim" if n.tem_st else "Não",
+                            "Status":    ", ".join(status) or "OK",
+                        })
+                    st.dataframe(pd.DataFrame(linhas_n), use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ABA 5 — GUIA DE REGRAS
+# SECÇÃO 5 — GUIA DE REGRAS
 # ══════════════════════════════════════════════════════════════════════════════
+st.divider()
+st.subheader("5. Guia de regras")
 with abas[4]:
-    st.header("📚 Guia de regras — Simples Nacional")
-    st.caption("Consulte sempre que tiver dúvida. Use o resumo na aba Resultados para conferir valores.")
+    st.caption("Consulte quando precisar. O resumo numérico está na secção **4. Resultados** acima.")
 
     tema = st.selectbox("Escolha o tema:", [
         "O que entra na receita bruta",
@@ -1980,10 +2064,10 @@ e compara com o que quiser **no olho** ou na sua planilha.
 
 | Causa | Onde olhar |
 |---|---|
-| Nota em um sistema e não no outro | Lista de notas por CNPJ (aba Resultados) |
+| Nota em um sistema e não no outro | Lista de notas por CNPJ (secção **4. Resultados**) |
 | Arredondamento da alíquota efetiva | Diferença de centavos — frequente |
 | ST diferente | CSOSN dos itens no XML |
-| Fator R / folha | Valores informados na aba Cliente |
+| Fator R / folha | Valores informados na secção **1. Cliente** |
 | Transferência como venda | CFOPs 5.352/6.352 |
 | Frete duplicado | CT-e + frete na NF-e |
 
