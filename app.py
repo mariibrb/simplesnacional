@@ -4,7 +4,7 @@ Apuração do Simples Nacional — ficheiro único para deploy (só `app.py` + `
 from __future__ import annotations
 import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 import zipfile
 import io
 import re
@@ -790,22 +790,80 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
     das_total      = Decimal("0")
     tipos_usados   = set()
 
+    merc_anex_12 = [
+        s
+        for s in cfg.segmentos
+        if s.get("tipo") == "mercadoria" and s.get("anexo") in ("I", "II")
+    ]
+    um_so_merc_anexo_12 = len(merc_anex_12) == 1
+    _split_merc_feito = False
+
     for sc in cfg.segmentos:
         tipo_cfg = sc.get("tipo","mercadoria")
         st_cfg   = sc.get("tem_st", False)
         anexo    = sc.get("anexo","I")
 
-        # Match exato, depois por tipo sem ST
-        receita = acumulado.get((tipo_cfg, st_cfg), Decimal("0"))
-        if receita == 0:
-            receita = acumulado.get((tipo_cfg, not st_cfg), Decimal("0"))
-        if receita <= 0:
+        # Um único segmento Mercadoria Anexo I ou II: reparte sozinha ST / não-ST
+        # pelos itens (CST/CSOSN nos XML). CFOP não basta para ST — evita orphan e
+        # dispensa dois segmentos manuais no caso mais comum.
+        if (
+            um_so_merc_anexo_12
+            and not _split_merc_feito
+            and tipo_cfg == "mercadoria"
+            and anexo in ("I", "II")
+        ):
+            _split_merc_feito = True
+            r_sem = acumulado.get(("mercadoria", False), Decimal("0"))
+            r_com = acumulado.get(("mercadoria", True), Decimal("0"))
+            if r_sem > 0 and r_com > 0:
+                alertas.append(
+                    "**Comércio (Anexo I ou II):** há receita **com** e **sem** ST nos XML. "
+                    "Com um único segmento mercadoria, o sistema **apurou em duas linhas** "
+                    "(como Seção I e II do PGDAS), usando **CST/CSOSN** dos itens — **não** o CFOP sozinho."
+                )
+            for st_key in (False, True):
+                receita = acumulado.get(("mercadoria", st_key), Decimal("0"))
+                if receita <= 0:
+                    continue
+                tipos_usados.add(("mercadoria", st_key))
+                seg = _calcular_segmento(
+                    receita, cfg.rbt12, anexo, st_key,
+                    cfg.icms_fora_simples, cfg.iss_fora_simples, cfg.folha12,
+                )
+                seg.tipo = "Mercadoria"
+                segs_apurados.append(seg)
+                receita_total += receita
+                das_total += seg.das
             continue
 
-        tipos_usados.add((tipo_cfg, st_cfg))
+        # Match por (tipo, ST) dos XML; se vazio, tenta o outro bucket do mesmo tipo.
+        # IMPORTANTE: a alíquota (retirada de ICMS na ST) deve seguir o bucket onde a
+        # receita **realmente** está nos XML — não só o checkbox do segmento. Senão,
+        # comércio só com itens ST (CSOSN 201 etc.) e segmento "sem ST" caía na alíquota
+        # ~5% em vez da ~3,3% do PGDAS (Seção II).
+        receita_ex = acumulado.get((tipo_cfg, st_cfg), Decimal("0"))
+        receita_fb = acumulado.get((tipo_cfg, not st_cfg), Decimal("0"))
+        if receita_ex > 0:
+            receita = receita_ex
+            st_efetivo = st_cfg
+        elif receita_fb > 0:
+            receita = receita_fb
+            st_efetivo = not st_cfg
+        else:
+            continue
+
+        if st_efetivo != st_cfg:
+            alertas.append(
+                f"Segmento **{tipo_cfg}** cadastrado com ST={'sim' if st_cfg else 'não'}, "
+                f"mas a receita dos XML está toda em ST={'sim' if st_efetivo else 'não'}. "
+                f"A **alíquota efetiva** foi calculada como **ST={'sim' if st_efetivo else 'não'}** "
+                f"(igual ao critério dos itens da NF-e)."
+            )
+
+        tipos_usados.add((tipo_cfg, st_efetivo))
 
         seg = _calcular_segmento(
-            receita, cfg.rbt12, anexo, st_cfg,
+            receita, cfg.rbt12, anexo, st_efetivo,
             cfg.icms_fora_simples, cfg.iss_fora_simples, cfg.folha12,
         )
         seg.tipo = tipo_cfg.capitalize()
@@ -816,10 +874,22 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
     # Avisos de receitas sem segmento configurado
     for (tipo_seg, st_seg), v in acumulado.items():
         if (tipo_seg, st_seg) not in tipos_usados and v > 0:
+            if tipo_seg == "mercadoria":
+                dica = (
+                    "Com **um** segmento Mercadoria Anexo I ou II o app **já separa** ST pelo XML. "
+                    "Se este aviso ainda aparece, costuma ser **mais de um** segmento mercadoria I/II à mão que não cobre todos os buckets — "
+                    "use **Personalizado** com uma linha **só** para mercadoria I (ou II) **ou** duas linhas explícitas (ST sim / não). "
+                    "ST vem do **CST/CSOSN** do item, não do CFOP."
+                )
+            else:
+                dica = (
+                    "Adicione um segmento **Serviço** (tipo e anexo conforme o caso) com ST alinhado ao que os XML indicam, "
+                    "ou ajuste o segmento existente."
+                )
             alertas.append(
-                f"ATENÇÃO: receita de '{tipo_seg}' (ST={st_seg}) = R$ {float(v):,.2f} "
-                f"não tem segmento configurado e NÃO entrou no DAS. "
-                f"Adicione um segmento para esse tipo na configuração da empresa."
+                f"ATENÇÃO: receita de **'{tipo_seg}'** com **ST={'sim' if st_seg else 'não'}** = R$ {float(v):,.2f} "
+                f"não tinha segmento correspondente e **não entrou no DAS**. "
+                + dica
             )
 
     fator_r_val: Optional[Decimal] = None
@@ -873,6 +943,97 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
 
 def apurar_lote(configs: List[ConfigEmpresa], notas: List[NotaFiscal]) -> List[ResultadoEmpresa]:
     return [apurar(cfg, notas) for cfg in configs]
+
+
+def _notas_saida_apuraveis_por_raiz(notas: List[NotaFiscal], raiz8: str) -> List[NotaFiscal]:
+    """Saídas da raiz, não canceladas, sem CT-e de frete — mesmo recorte que entra na apuração."""
+    rz = raiz8.zfill(8)
+    out: List[NotaFiscal] = []
+    for n in notas:
+        if n.tipo_op != "1":
+            continue
+        em = "".join(c for c in n.cnpj_emitente if c.isdigit())
+        if len(em) < 8 or em[:8] != rz:
+            continue
+        if n.cancelada or n.is_frete_cte:
+            continue
+        out.append(n)
+    return out
+
+
+def _raizes_emitentes_com_saida(notas: List[NotaFiscal]) -> List[str]:
+    s: set[str] = set()
+    for n in notas:
+        if n.tipo_op != "1" or n.cancelada or n.is_frete_cte:
+            continue
+        em = "".join(c for c in n.cnpj_emitente if c.isdigit())
+        if len(em) >= 8:
+            s.add(em[:8])
+    return sorted(s)
+
+
+def acumulado_receita_tipo_st(notas_validas_raiz: List[NotaFiscal]) -> Dict[tuple, Decimal]:
+    """Espelha a lógica de `apurar` para (tipo_item, tem_st) sem depender de ConfigEmpresa."""
+    acumulado: Dict[tuple, Decimal] = {}
+    for nota in notas_validas_raiz:
+        sinal = Decimal("-1") if nota.is_devolucao else Decimal("1")
+        for item in nota.itens:
+            if item.tipo == "transferencia":
+                continue
+            k = (item.tipo, item.tem_st)
+            acumulado[k] = acumulado.get(k, Decimal("0")) + sinal * item.valor
+    return acumulado
+
+
+def cfops_mais_frequentes(notas_raiz: List[NotaFiscal], limite: int = 18) -> str:
+    ctr: Counter[str] = Counter()
+    for n in notas_raiz:
+        for cf in n.cfops:
+            ctr[cf] += 1
+    if not ctr:
+        return "—"
+    return " · ".join(f"{cf} ({cnt})" for cf, cnt in ctr.most_common(limite))
+
+
+def texto_sugestao_conferencia_dominio(acum: Dict[tuple, Decimal]) -> str:
+    """Texto curto para comparar cadastro no Domínio (anexos / ST / misto)."""
+    m0 = acum.get(("mercadoria", False), Decimal("0"))
+    m1 = acum.get(("mercadoria", True), Decimal("0"))
+    s0 = acum.get(("servico", False), Decimal("0"))
+    s1 = acum.get(("servico", True), Decimal("0"))
+    merc = m0 + m1
+    serv = s0 + s1
+    if merc <= 0 and serv <= 0:
+        return (
+            "Não há receita de itens (mercadoria/serviço) neste recorte — só transferência, "
+            "ou notas fora do critério."
+        )
+    blocos: List[str] = []
+    if merc > 0 and serv > 0:
+        blocos.append(
+            "**Misto:** mercadoria **e** serviço nos XML. No Domínio costuma haver **mais de um anexo**; "
+            "no app use **Comércio (I) + serviços (III)** (ou Personalizado)."
+        )
+    if merc > 0:
+        if m0 > 0 and m1 > 0:
+            blocos.append(
+                "**Comércio Anexo I:** há venda **com** e **sem** ST (CSOSN nos itens). "
+                "Um **único** segmento Mercadoria · Anexo I basta — o app **apura em duas linhas** (estilo Seção I / II PGDAS)."
+            )
+        elif m1 > 0:
+            blocos.append(
+                "**Comércio Anexo I com ST** nos itens — confira no Domínio se a atividade está na **Seção II** (substituição)."
+            )
+        else:
+            blocos.append(
+                "**Comércio sem ST** nos itens — confira **Seção I** ou equivalente no Domínio."
+            )
+    if serv > 0:
+        blocos.append(
+            "**Serviço** em NF-e — no Domínio confira **Anexo III** (ou IV/V conforme CNAE/atividade cadastrada)."
+        )
+    return " ".join(blocos)
+
 
 # ── Config / pastas locais ───────────────────────────────────────────────────
 
@@ -1595,6 +1756,31 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
         for col, (label, val) in zip(cols, c.items()):
             col.metric(label, val)
 
+        st.subheader("Conferência com Domínio (ou outro ERP)")
+        st.caption(
+            "Resumo **automático** dos XML — **sem** abrir nota a nota: tipo de receita, ST pelos itens "
+            "(CSOSN/CST) e CFOPs frequentes, para bater com o **cadastro de anexos** no seu sistema."
+        )
+        for rz in _raizes_emitentes_com_saida(notas):
+            nvr = _notas_saida_apuraveis_por_raiz(notas, rz)
+            ac_dom = acumulado_receita_tipo_st(nvr)
+            with st.container():
+                st.markdown(f"##### CNPJ raiz **{fmt_raiz8(rz)}** — {len(nvr)} nota(s) de saída (apuráveis)")
+                lin_dom = []
+                for (tipo, stb), val in sorted(ac_dom.items(), key=lambda x: (x[0][0], x[0][1])):
+                    if val == 0:
+                        continue
+                    lin_dom.append({
+                        "Tipo (pelo item)": tipo.capitalize(),
+                        "ST": "Sim" if stb else "Não",
+                        "Receita no lote": br(val),
+                    })
+                if lin_dom:
+                    st.dataframe(pd.DataFrame(lin_dom), use_container_width=True, hide_index=True)
+                st.info(texto_sugestao_conferencia_dominio(ac_dom))
+                st.caption("**CFOPs mais frequentes:** " + cfops_mais_frequentes(nvr))
+                st.divider()
+
         with st.expander("🔍 Ver todas as notas lidas (com decisões do sistema)"):
             linhas = []
             for n in notas:
@@ -1826,19 +2012,23 @@ with abas[4]:
 | Venda com ST (ICMS já pago) | ✅ Sim | Entra na base; só a alíquota é reduzida |
 | Receita de filiais | ✅ Sim | Consolida na matriz |
 
-### O que NÃO entra
+### O que **não** entra como “venda positiva” — e mesmo assim **muda o total** do mês
 
-| O que é | Entra? | Por quê |
+Na coluna “Entra?” abaixo, **“Não”** quer dizer: **não soma como receita de venda/prestação a tributar** — não é “ignora o movimento”. O **faturado apurado no mês** (base do DAS) **muda sim** quando há devolução ou cancelamento.
+
+| O que é | Entra como receita (+)? | O que acontece no total do mês |
 |---|---|---|
-| Devolução de venda | ❌ Não (subtrai) | Estorna receita já reconhecida |
-| Venda de ativo imobilizado | ❌ Não | Não é receita operacional |
-| Transferência entre estabelecimentos | ❌ Não | Não é venda — é movimentação interna |
-| CT-e de frete (frete incluso na NF-e) | ❌ Não | Já está no valor da mercadoria |
-| Nota cancelada | ❌ Não | Sem efeito fiscal |
+| **Devolução** de venda (CFOP de devolução) | ❌ Não | **Subtrai** valores da receita bruta do período — estorna venda já contada em mês anterior ou no mesmo mês. |
+| **Nota cancelada** | ❌ Não | **Exclui** a operação: a nota **não integra** a receita bruta (não há “venda válida” a tributar). O total do mês **fica menor** do que seria se a nota ainda entrasse. |
+| Venda de ativo imobilizado | ❌ Não | Não é receita operacional do Simples |
+| Transferência entre estabelecimentos | ❌ Não | Não é venda — movimentação interna |
+| CT-e de frete (frete incluso na NF-e) | ❌ Não | Já está no valor da mercadoria na NF-e |
 | Receita financeira | ❌ Não | Salvo instituições financeiras |
 
-> **Regra de ouro:** a receita bruta é o que você efetivamente vendeu ou prestou de serviço. 
-> O Simples não deduz impostos da base — eles já estão calculados por dentro da alíquota.
+**Devolução × cancelada:** devolução é **movimento espelho** (menos na base). Cancelada é **anulação** — o sistema **não** trata como “menos uma venda” na mesma linha contábil; **simplesmente não conta** a nota cancelada na receita (efeito no total: também reduz o que entra no DAS).
+
+> **Regra de ouro:** a receita bruta do Simples é o **saldo** das operações que **geram** receita tributável no período, respeitando devoluções e excluindo o que não é venda válida (ex.: cancelada, transferência).  
+> O Simples não “desconta imposto” da base — a alíquota já embute a tributação.
         """)
 
     elif tema == "CFOPs: entra ou não entra?":
@@ -1881,6 +2071,8 @@ antecipadamente, a empresa não precisa pagar ICMS de novo na saída.
 Por isso, a parcela de ICMS é **removida da alíquota efetiva do DAS** para essas vendas.
 
 ### Como identificar ST no XML
+
+**CFOP não define ST sozinho.** Existem CFOPs que *em geral* acompanham ST (ex.: 5.405), mas a regra fiscal e o que este app usa é o **CST/CSOSN (ou CST)** de **cada item** — o mesmo CFOP pode aparecer com ou sem ST.
 
 No XML da NF-e, em cada item `<det>`, dentro do bloco `<ICMS>`:
 
