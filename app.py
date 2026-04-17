@@ -1116,10 +1116,87 @@ def papel_matriz_filial(cnpj14: str) -> str:
     return f"Filial (ordem {est})"
 
 
+def normalizar_chave_44(s: str) -> str:
+    d = re.sub(r"\D", "", str(s or ""))
+    if len(d) >= 44:
+        return d[-44:]
+    return d
+
+
+def ler_chaves_cancel_excel_bytes(raw: bytes) -> Tuple[set, List[str]]:
+    """Lê coluna A; cada célula com 44 dígitos vira chave NFe."""
+    avisos: List[str] = []
+    chaves: set = set()
+    bio = io.BytesIO(raw)
+    try:
+        df = pd.read_excel(bio, header=None, usecols=[0], engine="openpyxl")
+    except Exception:
+        try:
+            bio.seek(0)
+            df = pd.read_excel(bio, header=None, usecols=[0], engine="xlrd")
+        except Exception as e:
+            return set(), [f"Não foi possível ler a planilha (.xlsx ou .xls): {e}"]
+    col0 = df.iloc[:, 0]
+    for v in col0:
+        if pd.isna(v):
+            continue
+        nk = normalizar_chave_44(str(v).strip())
+        if len(nk) == 44:
+            chaves.add(nk)
+        elif nk:
+            avisos.append(f"Ignorado (não tem 44 dígitos): {str(v)[:32]}…")
+    return chaves, avisos
+
+
+def aplicar_cancelamentos_planilha(notas: List[NotaFiscal], chaves: set) -> Tuple[int, List[str]]:
+    """Marca cancelada se a chave da nota estiver no conjunto da planilha."""
+    if not chaves or not notas:
+        return 0, []
+    rest = set(chaves)
+    marcadas = 0
+    for n in notas:
+        kn = normalizar_chave_44(n.chave)
+        if len(kn) != 44:
+            continue
+        if kn not in chaves:
+            continue
+        rest.discard(kn)
+        if not n.cancelada:
+            n.cancelada = True
+            n.decisoes.append("CANCELADA — chave informada na planilha Excel (coluna A).")
+            marcadas += 1
+        elif not any("planilha Excel" in d for d in n.decisoes):
+            n.decisoes.append("Chave confirmada também na planilha Excel (coluna A).")
+    avisos: List[str] = []
+    if rest:
+        avisos.append(
+            f"{len(rest)} chave(s) da planilha **não** têm nota correspondente no lote atual."
+        )
+    return marcadas, avisos
+
+
+def reverter_cancelamentos_somente_planilha(notas: List[NotaFiscal]) -> None:
+    """Remove efeito da planilha; mantém cancelamento vindo de XML/evento."""
+    for n in notas:
+        tem_xml = any("evento de cancelamento encontrado nos arquivos" in d for d in n.decisoes)
+        n.decisoes = [d for d in n.decisoes if "planilha Excel" not in d]
+        if not tem_xml:
+            n.cancelada = False
+
+
 # ── Estado de sessão ──────────────────────────────────────────────────────────
 if "configs"    not in st.session_state: st.session_state.configs    = []
 if "notas"      not in st.session_state: st.session_state.notas      = []
 if "resultados" not in st.session_state: st.session_state.resultados = []
+if "chaves_cancel_excel" not in st.session_state:
+    st.session_state.chaves_cancel_excel = set()
+
+
+def definir_notas_e_planilha(notas: List[NotaFiscal]) -> None:
+    st.session_state.notas = notas
+    ch = st.session_state.get("chaves_cancel_excel") or set()
+    if ch:
+        aplicar_cancelamentos_planilha(notas, ch)
 
 RUN_CFG = carregar_config()
 _SO_WEB = ambiente_so_web(RUN_CFG)
@@ -1304,8 +1381,52 @@ Ele só marca nota como cancelada se encontrar, no lote:
 Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamento, a nota continua **válida** no cálculo — porque o sistema não tem como saber que foi cancelada depois.
 
 **O que fazer na prática:** ao baixar da SEFAZ ou do seu emissor, inclua na pasta/ZIP também os **XML de eventos** (cancelamento, carta de correção não cancela, mas cancelamento sim). Ou use o **pacote completo** do período que já traga notas + eventos juntos.
+
+**Alternativa:** envie uma **planilha Excel** (coluna A com as **44 posições da chave** das notas canceladas) na seção abaixo — o app marca o cancelamento ao casar a chave com as notas já carregadas.
             """
         )
+
+    st.subheader("Cancelamentos por planilha Excel")
+    st.caption("Coluna **A**: uma chave de NF-e por linha (44 dígitos, com ou sem formatação). Depois use **Carregar chaves**.")
+    xls_cancel = st.file_uploader(
+        "Arquivo Excel (.xlsx ou .xls)",
+        type=["xlsx", "xls"],
+        key="upload_chaves_cancel",
+    )
+    bx1, bx2 = st.columns(2)
+    with bx1:
+        if st.button("📎 Carregar chaves e aplicar aos XMLs", type="secondary"):
+            if not xls_cancel:
+                st.error("Selecione um arquivo Excel.")
+            else:
+                raw = xls_cancel.getvalue()
+                chaves, avisos = ler_chaves_cancel_excel_bytes(raw)
+                for a in avisos[:15]:
+                    st.warning(a)
+                if avisos and len(avisos) > 15:
+                    st.caption(f"(+{len(avisos) - 15} aviso(s) omitidos)")
+                st.session_state.chaves_cancel_excel = chaves
+                if st.session_state.notas:
+                    reverter_cancelamentos_somente_planilha(st.session_state.notas)
+                    m, extra = aplicar_cancelamentos_planilha(st.session_state.notas, chaves)
+                    for e in extra:
+                        st.info(e)
+                    st.success(
+                        f"**{len(chaves)}** chave(s) na planilha · **{m}** nota(s) marcada(s) como cancelada."
+                    )
+                else:
+                    st.success(
+                        f"**{len(chaves)}** chave(s) guardadas. Carregue os XMLs depois — as chaves serão aplicadas automaticamente."
+                    )
+                st.rerun()
+    with bx2:
+        if st.button("Limpar planilha de chaves"):
+            st.session_state.chaves_cancel_excel = set()
+            if st.session_state.notas:
+                reverter_cancelamentos_somente_planilha(st.session_state.notas)
+            st.rerun()
+    if st.session_state.chaves_cancel_excel:
+        st.caption(f"Chaves ativas na planilha: **{len(st.session_state.chaves_cancel_excel)}**")
 
     if RUN_CFG.modo == "upload":
         if not _SO_WEB:
@@ -1334,7 +1455,7 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
             with st.spinner("Lendo XMLs..."):
                 arquivos = [(f.name, f.read()) for f in uploaded]
                 notas = ler_arquivos(arquivos)
-                st.session_state.notas = notas
+                definir_notas_e_planilha(notas)
             st.success(f"✅ {len(notas)} documento(s) lido(s).")
 
     if RUN_CFG.permite_pastas:
@@ -1370,7 +1491,7 @@ Se você enviar **só a NF-e original** e **não** o XML do evento de cancelamen
                         st.error("Nenhum .xml ou .zip encontrado nesses caminhos.")
                     else:
                         notas = ler_arquivos(arquivos)
-                        st.session_state.notas = notas
+                        definir_notas_e_planilha(notas)
                         st.success(
                             f"✅ {len(notas)} documento(s) a partir de **{len(arquivos)}** arquivo(s) no disco."
                         )
