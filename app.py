@@ -4,8 +4,6 @@ Apuração do Simples Nacional — ficheiro único para deploy (só `app.py` + `
 from __future__ import annotations
 import json
 import os
-import subprocess
-import webbrowser
 import zipfile
 import io
 import re
@@ -805,12 +803,11 @@ CONFIG_JSON = Path(__file__).resolve().parent / "config_app.json"
 
 @dataclass
 class AppRuntimeConfig:
-    """modo: upload | hibrido | pastas — URL opcional para Chrome / compartilhar na LAN."""
+    """modo: upload | hibrido | pastas"""
 
     modo: str
     pastas_padrao: List[str] = field(default_factory=list)
     recursivo: bool = True
-    app_url: Optional[str] = None
 
     @property
     def permite_upload(self) -> bool:
@@ -875,7 +872,6 @@ def carregar_config() -> AppRuntimeConfig:
     modo = "upload"
     pastas: List[str] = []
     recursivo = True
-    app_url: Optional[str] = None
 
     if CONFIG_JSON.exists():
         try:
@@ -885,9 +881,6 @@ def carregar_config() -> AppRuntimeConfig:
             if isinstance(px, dict):
                 pastas = [str(p).strip() for p in px.get("caminhos", []) if str(p).strip()]
                 recursivo = bool(px.get("recursivo", True))
-            au = data.get("app_url")
-            if au and str(au).strip():
-                app_url = str(au).strip().rstrip("/")
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -923,28 +916,7 @@ def carregar_config() -> AppRuntimeConfig:
         modo = "upload"
         pastas = []
 
-    sec_url = _secrets_get("SN_APP_URL")
-    if sec_url and str(sec_url).strip():
-        app_url = str(sec_url).strip().rstrip("/")
-    env_url = os.environ.get("SN_APP_URL", "").strip()
-    if env_url:
-        app_url = env_url.rstrip("/")
-
-    return AppRuntimeConfig(
-        modo=modo, pastas_padrao=pastas, recursivo=recursivo, app_url=app_url
-    )
-
-
-def resolver_url_app(cfg: AppRuntimeConfig) -> str:
-    """URL desta instância (Chrome, links). Prioridade: SN_APP_URL / secrets > config app_url > localhost."""
-    if cfg.app_url:
-        return cfg.app_url.rstrip("/")
-    port = os.environ.get("STREAMLIT_SERVER_PORT", os.environ.get("PORT", "8501")).strip()
-    try:
-        p = int(port)
-    except ValueError:
-        p = 8501
-    return f"http://127.0.0.1:{p}"
+    return AppRuntimeConfig(modo=modo, pastas_padrao=pastas, recursivo=recursivo)
 
 
 def ambiente_so_web(cfg: AppRuntimeConfig) -> bool:
@@ -1057,37 +1029,15 @@ def cnpj8(s: str) -> str:
 def cnpj14(s: str) -> str:
     return "".join(c for c in s if c.isdigit())
 
-def _abrir_simples_no_chrome(url: str) -> Tuple[bool, str]:
-    """Tenta Google Chrome no Windows; senão navegador padrão. Retorna (usou_chrome, mensagem)."""
-    if os.name == "nt":
-        candidatos = [
-            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        ]
-        for exe in candidatos:
-            if exe and os.path.isfile(exe):
-                try:
-                    subprocess.Popen([exe, url], close_fds=True)
-                    return True, "Abrindo no Google Chrome…"
-                except OSError:
-                    continue
-    try:
-        webbrowser.open(url)
-    except OSError:
-        return False, "Não foi possível abrir o navegador."
-    return False, "Chrome não encontrado — abrindo no navegador padrão."
-
 # ── Estado de sessão ──────────────────────────────────────────────────────────
 if "configs"    not in st.session_state: st.session_state.configs    = []
 if "notas"      not in st.session_state: st.session_state.notas      = []
 if "resultados" not in st.session_state: st.session_state.resultados = []
 
 RUN_CFG = carregar_config()
-_url_app = resolver_url_app(RUN_CFG)
 _SO_WEB = ambiente_so_web(RUN_CFG)
 
-# ── Barra lateral — mesmo ritmo do app legado: blocos + **Ações** + botão primário ───
+# ── Barra lateral ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("##### Simples Nacional")
     if _SO_WEB:
@@ -1095,30 +1045,7 @@ with st.sidebar:
     else:
         st.caption(RUN_CFG.perfil_execucao)
         st.caption(f"XML: **{RUN_CFG.modo_label}**")
-
-    st.divider()
-    st.markdown("**Ações**")
-    if not _SO_WEB:
-        st.caption(_url_app)
-    if st.button(
-        "Abrir app no Chrome",
-        type="primary",
-        use_container_width=True,
-        help=(
-            "Abre o endereço do app no Google Chrome."
-            if _SO_WEB
-            else (
-                "Abre esta URL no Google Chrome (Windows). Na rede local, defina app_url ou SN_APP_URL "
-                "com o IP da máquina (ex.: http://192.168.0.10:8501)."
-            )
-        ),
-    ):
-        _chrome, msg = _abrir_simples_no_chrome(_url_app)
-        st.toast(msg, icon="🌐")
-
-    if not _SO_WEB:
         st.divider()
-        st.markdown("**Servidor**")
         st.caption(
             "Nuvem: só upload. Neste PC: `py -m streamlit run app.py` (opcional: `SN_MODO=hibrido`)."
         )
@@ -1147,10 +1074,12 @@ abas = st.tabs([
 # ABA 1 — EMPRESAS
 # ══════════════════════════════════════════════════════════════════════════════
 with abas[0]:
-    st.header("Configurar empresas")
+    st.header("Parâmetros por empresa (esta sessão)")
     st.info(
-        "**Mínimo para preencher:** nome, CNPJ raiz, RBT12 e pelo menos um segmento. "
-        "O sistema cuida do resto lendo os XMLs."
+        "**Não há banco de dados:** o que você preenche fica só na **memória desta aba** até fechar o navegador. "
+        "Mesmo assim é preciso **cadastrar cada empresa** porque o cálculo precisa saber **qual CNPJ** filtrar nos XMLs, "
+        "**qual RBT12 e anexos** usar nas faixas e **Fator R / flags** — isso não vem do arquivo fiscal sozinho. "
+        "**Mínimo:** nome, CNPJ raiz, RBT12 e pelo menos um segmento."
     )
 
     with st.form("nova_empresa", clear_on_submit=True):
