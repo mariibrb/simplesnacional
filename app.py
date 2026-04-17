@@ -482,19 +482,29 @@ D13 = Decimal("0.0000000000001")
 # ── Configuração da empresa (informada pelo usuário) ──────────────────────────
 @dataclass
 class ConfigEmpresa:
-    nome: str
-    cnpj_raiz: str           # 8 primeiros dígitos
+    cnpj_raiz: str           # 8 primeiros dígitos — identifica o cliente na apuração
     rbt12: Decimal
     # Lista de segmentos: cada um tem anexo, tipo e flags especiais
-    # Ex: [{"anexo":"I","tipo":"mercadoria","tem_st":True},
-    #       {"anexo":"III","tipo":"servico","tem_st":False}]
     segmentos: List[dict]
+    nome: str = ""           # opcional (apelido); tela usa CNPJ raiz se vazio
     folha12: Optional[Decimal] = None     # para Fator R
+    receita_servico_manual: Optional[Decimal] = None  # NFS-e sem XML / valores informados à mão
     cnpjs_filiais: List[str] = field(default_factory=list)
     # Flags de desenquadramento
     icms_fora_simples: bool = False
     iss_fora_simples: bool  = False
-    das_dominio: Optional[Decimal] = None  # valor do Domínio para comparar
+
+
+def rotulo_empresa(cfg: ConfigEmpresa) -> str:
+    """Nome amigável na tabela: apelido opcional ou CNPJ raiz formatado."""
+    n = (cfg.nome or "").strip()
+    if n:
+        return n
+    r = cfg.cnpj_raiz
+    if len(r) == 8 and r.isdigit():
+        return f"Raiz {r[:2]}.{r[2:5]}.{r[5:8]}"
+    return f"Raiz {r}"
+
 
 # ── Resultado ─────────────────────────────────────────────────────────────────
 @dataclass
@@ -520,7 +530,6 @@ class ResultadoEmpresa:
     fator_r: Optional[Decimal]
     receita_total: Decimal
     das_total: Decimal
-    das_dominio: Optional[Decimal]
     segmentos: List[SegApurado]
     notas_validas: int
     notas_canceladas: int
@@ -528,9 +537,6 @@ class ResultadoEmpresa:
     notas_frete: int
     notas_transferencia: int
     alertas: List[str]
-    # Comparação com Domínio
-    diff_dominio: Optional[Decimal] = None
-    analise_diff: List[str] = field(default_factory=list)
 
 # ── Cálculo core ──────────────────────────────────────────────────────────────
 
@@ -722,6 +728,24 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
                 "Devoluções superam as vendas neste segmento no mês."
             )
 
+    # ── Serviços sem XML (valor manual) ───────────────────────────────────────
+    if cfg.receita_servico_manual is not None and cfg.receita_servico_manual > 0:
+        serv_segs = [s for s in cfg.segmentos if s.get("tipo") == "servico"]
+        if not serv_segs:
+            alertas.append(
+                "Há **receita de serviço manual**, mas nenhum segmento **Serviço** foi configurado — "
+                "esse valor não entrou no DAS. Inclua um segmento Serviço (ex.: Anexo III)."
+            )
+        else:
+            sc0 = serv_segs[0]
+            st_m = bool(sc0.get("tem_st", False))
+            k = ("servico", st_m)
+            acumulado[k] = acumulado.get(k, Decimal("0")) + cfg.receita_servico_manual
+            alertas.append(
+                f"Serviços **sem XML**: + {br(cfg.receita_servico_manual)} somados ao segmento serviço "
+                f"(usa o 1º segmento Serviço: Anexo {sc0.get('anexo','?')}, ST={'sim' if st_m else 'não'})."
+            )
+
     # ── Calcula DAS por segmento configurado ───────────────────────────────────
     segs_apurados: List[SegApurado] = []
     receita_total  = Decimal("0")
@@ -760,37 +784,18 @@ def apurar(cfg: ConfigEmpresa, notas: List[NotaFiscal]) -> ResultadoEmpresa:
                 f"Adicione um segmento para esse tipo na configuração da empresa."
             )
 
-    # ── Comparação com Domínio ────────────────────────────────────────────────
-    diff = None
-    analise: List[str] = []
-    if cfg.das_dominio is not None:
-        diff = das_total - cfg.das_dominio
-        if abs(diff) < Decimal("0.05"):
-            analise.append("Resultado IGUAL ao Domínio (diferença < R$ 0,05 — apenas arredondamento).")
-        elif diff > 0:
-            analise.append(
-                f"App calculou R$ {float(diff):,.2f} a MAIS que o Domínio. "
-                "Possíveis causas: (1) alguma nota excluída no Domínio e incluída aqui, "
-                "(2) ST não aplicada no app mas aplicada no Domínio, "
-                "(3) nota de transferência incluída indevidamente aqui."
-            )
-        else:
-            analise.append(
-                f"Domínio calculou R$ {float(abs(diff)):,.2f} a MAIS que o app. "
-                "Possíveis causas: (1) nota incluída no Domínio que o app não leu, "
-                "(2) ST aplicada no app mas não no Domínio, "
-                "(3) pró-labore/folha diferente para o Fator R."
-            )
+    fator_r_val: Optional[Decimal] = None
+    if cfg.folha12 is not None and cfg.rbt12 > 0:
+        fator_r_val = (cfg.folha12 / cfg.rbt12).quantize(Decimal("0.0001"), ROUND_HALF_UP)
 
     return ResultadoEmpresa(
-        nome=cfg.nome, cnpj_raiz=cfg.cnpj_raiz, rbt12=cfg.rbt12,
-        fator_r=next((s.aliq_efetiva for s in segs_apurados if s.anexo == "V"), None),
+        nome=rotulo_empresa(cfg), cnpj_raiz=cfg.cnpj_raiz, rbt12=cfg.rbt12,
+        fator_r=fator_r_val,
         receita_total=receita_total, das_total=das_total,
-        das_dominio=cfg.das_dominio,
         segmentos=segs_apurados,
         notas_validas=len(notas_validas), notas_canceladas=n_canceladas,
         notas_devolucao=n_dev, notas_frete=n_frete, notas_transferencia=n_transf,
-        alertas=alertas, diff_dominio=diff, analise_diff=analise,
+        alertas=alertas,
     )
 
 def apurar_lote(configs: List[ConfigEmpresa], notas: List[NotaFiscal]) -> List[ResultadoEmpresa]:
@@ -1029,6 +1034,15 @@ def cnpj8(s: str) -> str:
 def cnpj14(s: str) -> str:
     return "".join(c for c in s if c.isdigit())
 
+
+def fmt_raiz8(r: str) -> str:
+    """CNPJ raiz para exibir: XX.XXX.XXX"""
+    d = "".join(c for c in (r or "") if c.isdigit())[:8]
+    if len(d) != 8:
+        return r or "—"
+    return f"{d[:2]}.{d[2:5]}.{d[5:8]}"
+
+
 # ── Estado de sessão ──────────────────────────────────────────────────────────
 if "configs"    not in st.session_state: st.session_state.configs    = []
 if "notas"      not in st.session_state: st.session_state.notas      = []
@@ -1063,7 +1077,7 @@ else:
     )
 
 abas = st.tabs([
-    "1️⃣ Empresas",
+    "1️⃣ Cliente (CNPJ)",
     "2️⃣ Carregar XMLs",
     "3️⃣ Calcular",
     "4️⃣ Resultados",
@@ -1074,18 +1088,17 @@ abas = st.tabs([
 # ABA 1 — EMPRESAS
 # ══════════════════════════════════════════════════════════════════════════════
 with abas[0]:
-    st.header("Parâmetros por empresa (esta sessão)")
+    st.header("Parâmetros do cliente — CNPJ (esta sessão)")
     st.info(
         "**Não há banco de dados:** o que você preenche fica só na **memória desta aba** até fechar o navegador. "
-        "Mesmo assim é preciso **cadastrar cada empresa** porque o cálculo precisa saber **qual CNPJ** filtrar nos XMLs, "
+        "Mesmo assim é preciso **informar cada CNPJ (cliente)** porque o cálculo precisa saber **qual raiz** filtrar nos XMLs, "
         "**qual RBT12 e anexos** usar nas faixas e **Fator R / flags** — isso não vem do arquivo fiscal sozinho. "
-        "**Mínimo:** nome, CNPJ raiz, RBT12 e pelo menos um segmento."
+        "**Mínimo:** CNPJ (raiz ou completo), RBT12 e pelo menos um segmento."
     )
 
     with st.form("nova_empresa", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
-            nome       = st.text_input("Nome / Razão Social *")
             cnpj_input = st.text_input("CNPJ raiz (8 dígitos) ou CNPJ completo *",
                                         help="Os 8 primeiros dígitos agrupam matriz e filiais automaticamente.")
             rbt12_txt  = st.text_input("RBT12 — Receita acumulada dos 12 meses ANTERIORES (R$) *",
@@ -1098,11 +1111,6 @@ with abas[0]:
             )
 
         with c2:
-            das_dominio_txt = st.text_input(
-                "DAS conforme Domínio (R$) — para comparação",
-                placeholder="3.252,60",
-                help="Preencha com o valor gerado pelo seu sistema. O app vai comparar e explicar as diferenças.",
-            )
             folha12_txt = st.text_input(
                 "Folha de pagamento — 12 meses (R$)",
                 placeholder="0,00",
@@ -1117,8 +1125,18 @@ with abas[0]:
                 help="Marque se o ISS é recolhido separadamente pela guia municipal.",
             )
 
-            st.markdown("**Segmentos de receita desta empresa**")
-            st.caption("Um segmento por tipo de atividade. Empresa mista = dois segmentos.")
+            receita_serv_txt = st.text_input(
+                "Receita de serviços **sem XML** (R$) — opcional",
+                placeholder="0,00",
+                help=(
+                    "NFS-e que não entram como arquivo (papel, outro sistema, etc.). "
+                    "O valor **soma** ao que vier de XML para o **primeiro segmento Serviço** "
+                    "(ex.: Anexo III — o anexo é o que você escolher abaixo em Serviço)."
+                ),
+            )
+
+            st.markdown("**Segmentos de receita (este CNPJ)**")
+            st.caption("Um segmento por tipo de atividade. CNPJ misto = dois segmentos.")
             n_segs = st.number_input("Quantos segmentos?", 1, 5, 1)
             segs_in = []
             for i in range(int(n_segs)):
@@ -1131,10 +1149,9 @@ with abas[0]:
                                     help="Marque se as mercadorias são compradas com ICMS-ST já pago.")
                 segs_in.append({"tipo":tipo,"anexo":anexo,"tem_st":st_cb})
 
-        salvar = st.form_submit_button("➕ Adicionar empresa", type="primary")
+        salvar = st.form_submit_button("➕ Adicionar cliente", type="primary")
         if salvar:
             erros = []
-            if not nome.strip():       erros.append("Informe o nome.")
             if not cnpj_input.strip(): erros.append("Informe o CNPJ.")
             try:
                 rbt12 = parse(rbt12_txt)
@@ -1147,23 +1164,35 @@ with abas[0]:
                 for e in erros: st.error(e)
             else:
                 filiais = [cnpj14(x) for x in filiais_txt.strip().splitlines() if x.strip()]
-                st.session_state.configs.append(ConfigEmpresa(
-                    nome=nome.strip(),
-                    cnpj_raiz=cnpj8(cnpj_input),
-                    rbt12=rbt12,
-                    segmentos=segs_in,
-                    folha12=parse(folha12_txt) if folha12_txt.strip() else None,
-                    cnpjs_filiais=filiais,
-                    icms_fora_simples=icms_fora,
-                    iss_fora_simples=iss_fora,
-                    das_dominio=parse(das_dominio_txt) if das_dominio_txt.strip() else None,
-                ))
-                st.success(f"✅ {nome} adicionada!")
-                st.rerun()
+                rsm: Optional[Decimal] = None
+                err_manual: List[str] = []
+                try:
+                    rsm = parse(receita_serv_txt) if receita_serv_txt.strip() else None
+                    if rsm is not None and rsm < 0:
+                        err_manual.append("Receita de serviço manual não pode ser negativa.")
+                except Exception:
+                    err_manual.append("Valor de serviços sem XML inválido.")
+                if err_manual:
+                    for e in err_manual:
+                        st.error(e)
+                else:
+                    nova = ConfigEmpresa(
+                        cnpj_raiz=cnpj8(cnpj_input),
+                        rbt12=rbt12,
+                        segmentos=segs_in,
+                        folha12=parse(folha12_txt) if folha12_txt.strip() else None,
+                        receita_servico_manual=rsm if rsm and rsm > 0 else None,
+                        cnpjs_filiais=filiais,
+                        icms_fora_simples=icms_fora,
+                        iss_fora_simples=iss_fora,
+                    )
+                    st.session_state.configs.append(nova)
+                    st.success(f"✅ {rotulo_empresa(nova)} adicionado!")
+                    st.rerun()
 
     # Lista
     if st.session_state.configs:
-        st.subheader(f"{len(st.session_state.configs)} empresa(s) configurada(s)")
+        st.subheader(f"{len(st.session_state.configs)} cliente(s) com parâmetros")
         for i, cfg in enumerate(st.session_state.configs):
             segs_str = " + ".join(
                 f"{s['tipo'].capitalize()} Anexo {s['anexo']}"
@@ -1175,14 +1204,16 @@ with abas[0]:
             if cfg.icms_fora_simples: flags.append("ICMS fora")
             if cfg.iss_fora_simples:  flags.append("ISS fora")
             if cfg.folha12:           flags.append(f"Folha {br(cfg.folha12)}")
+            if cfg.receita_servico_manual:
+                flags.append(f"Serv. manual {br(cfg.receita_servico_manual)}")
             col1.markdown(
-                f"**{cfg.nome}** · Raiz `{cfg.cnpj_raiz}` · RBT12 {br(cfg.rbt12)} · "
+                f"**{rotulo_empresa(cfg)}** · RBT12 {br(cfg.rbt12)} · "
                 f"{segs_str}" + (f" · {' | '.join(flags)}" if flags else "")
             )
             if col2.button("🗑️", key=f"del{i}"):
                 st.session_state.configs.pop(i); st.rerun()
     else:
-        st.info("Nenhuma empresa configurada ainda.")
+        st.info("Nenhum CNPJ configurado ainda.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ABA 2 — CARREGAR XMLs
@@ -1305,15 +1336,15 @@ with abas[2]:
 
     ne = len(st.session_state.configs)
     nn = len(st.session_state.notas)
-    st.metric("Empresas configuradas", ne)
+    st.metric("Clientes (CNPJ) configurados", ne)
     st.metric("XMLs carregados", nn)
 
     if ne == 0:
-        st.warning("Configure pelo menos uma empresa na aba 1.")
+        st.warning("Informe pelo menos um CNPJ na aba 1.")
     elif nn == 0:
         st.warning("Carregue os XMLs na aba 2.")
     else:
-        if st.button("🚀 Calcular DAS de todas as empresas", type="primary"):
+        if st.button("🚀 Calcular DAS de todos os clientes", type="primary"):
             with st.spinner("Calculando..."):
                 resultados = apurar_lote(st.session_state.configs, st.session_state.notas)
                 st.session_state.resultados = resultados
@@ -1331,64 +1362,74 @@ with abas[3]:
         st.stop()
 
     # ── Resumo geral ──────────────────────────────────────────────────────────
-    st.subheader("Resumo geral")
+    st.subheader("Resumo por CNPJ")
     linhas_resumo = []
     for r in resultados:
         linha = {
-            "Empresa":       r.nome,
+            "CNPJ raiz":     fmt_raiz8(r.cnpj_raiz),
+            "Cliente":       r.nome,
+            "RBT12":         br(r.rbt12),
             "Notas válidas": r.notas_validas,
             "Canceladas":    r.notas_canceladas,
             "Devoluções":    r.notas_devolucao,
             "Receita total": br(r.receita_total),
-            "DAS (app)":     br(r.das_total),
+            "DAS total":     br(r.das_total),
         }
-        if r.das_dominio is not None:
-            linha["DAS (Domínio)"] = br(r.das_dominio)
-            linha["Diferença"]     = br(r.diff_dominio, prefix="")
+        if r.fator_r is not None:
+            linha["Fator R"] = f"{float(r.fator_r)*100:.2f}%".replace(".", ",")
         linhas_resumo.append(linha)
 
     st.dataframe(pd.DataFrame(linhas_resumo), use_container_width=True)
-    st.metric("Total DAS todas as empresas", br(sum(r.das_total for r in resultados)))
+    st.metric("Total DAS (todos os clientes)", br(sum(r.das_total for r in resultados)))
+
+    st.subheader("Detalhe por CNPJ, segmento e alíquota")
+    st.caption(
+        "Uma linha por combinação de tipo de receita + anexo usado no cálculo: faixa, alíquota nominal, "
+        "alíquota efetiva (PGDAS), receita e DAS do segmento."
+    )
+    linhas_det = []
+    for r in resultados:
+        for seg in r.segmentos:
+            linhas_det.append({
+                "CNPJ raiz":        fmt_raiz8(r.cnpj_raiz),
+                "Tipo receita":     seg.tipo,
+                "Anexo cadastro":   seg.anexo,
+                "Anexo efetivo":    seg.anexo_efetivo,
+                "Atividade (tabela)": ANEXOS_DESC.get(seg.anexo_efetivo, ""),
+                "ST":               "Sim" if seg.tem_st else "Não",
+                "Faixa RBT12":      f"{seg.faixa}ª",
+                "Alíq. nominal":    pct(seg.aliq_nominal),
+                "Parcela deduzir":  br(seg.deducao),
+                "Alíq. efetiva":    pct(seg.aliq_efetiva),
+                "Receita segmento": br(seg.receita),
+                "DAS segmento":     br(seg.das),
+            })
+    if linhas_det:
+        st.dataframe(pd.DataFrame(linhas_det), use_container_width=True)
+    else:
+        st.warning("Nenhum segmento apurado — verifique segmentos na aba 1 e XMLs na aba 2.")
+
     st.divider()
 
-    # ── Detalhe por empresa ───────────────────────────────────────────────────
+    # ── Detalhe por cliente ───────────────────────────────────────────────────
     for r in resultados:
 
-        # Cabeçalho colorido por status de comparação
-        if r.das_dominio is not None and r.diff_dominio is not None:
-            if abs(r.diff_dominio) < Decimal("0.05"):
-                badge = "✅ Igual ao Domínio"
-            elif r.diff_dominio > 0:
-                badge = f"⚠️ App {br(r.diff_dominio)} a mais que Domínio"
-            else:
-                badge = f"⚠️ Domínio {br(abs(r.diff_dominio))} a mais que App"
-        else:
-            badge = ""
-
         titulo = f"📋 {r.nome}  —  DAS {br(r.das_total)}"
-        if badge: titulo += f"  {badge}"
 
-        with st.expander(titulo, expanded=True):
+        with st.expander(titulo, expanded=False):
 
             # Alertas
             for al in r.alertas:
                 st.warning(al)
 
-            # Análise de diferença com Domínio
-            if r.analise_diff:
-                for an in r.analise_diff:
-                    st.info(an)
-
             # Métricas
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Receita total", br(r.receita_total))
-            c2.metric("DAS (app)",     br(r.das_total))
-            if r.das_dominio:
-                c3.metric("DAS (Domínio)", br(r.das_dominio))
-                c4.metric("Diferença",     br(r.diff_dominio, prefix=""))
-            else:
-                c3.metric("Notas válidas",  r.notas_validas)
-                c4.metric("Devoluções",     r.notas_devolucao)
+            c2.metric("DAS total",     br(r.das_total))
+            c3.metric("Notas válidas",  r.notas_validas)
+            c4.metric("Devoluções",     r.notas_devolucao)
+            if r.fator_r is not None:
+                st.caption(f"Fator R (folha ÷ RBT12): **{float(r.fator_r)*100:.4f}%**".replace(".", ","))
 
             # Segmentos
             for seg in r.segmentos:
@@ -1452,7 +1493,7 @@ with abas[3]:
 # ══════════════════════════════════════════════════════════════════════════════
 with abas[4]:
     st.header("📚 Guia de regras — Simples Nacional")
-    st.caption("Consulte sempre que tiver dúvida. Compare com o que o Domínio gerou.")
+    st.caption("Consulte sempre que tiver dúvida. Use o resumo na aba Resultados para conferir valores.")
 
     tema = st.selectbox("Escolha o tema:", [
         "O que entra na receita bruta",
@@ -1462,7 +1503,7 @@ with abas[4]:
         "Desenquadramento ICMS/ISS",
         "Matriz e filial",
         "A fórmula do DAS explicada",
-        "Por que meu resultado difere do Domínio?",
+        "Diferenças entre sistemas (conferência manual)",
     ])
 
     if tema == "O que entra na receita bruta":
@@ -1703,28 +1744,23 @@ Se a receita do mês foi R$ 45.000:
 - ICMS/ISS fora: remove a parcela do tributo
         """)
 
-    elif tema == "Por que meu resultado difere do Domínio?":
+    elif tema == "Diferenças entre sistemas (conferência manual)":
         st.markdown("""
-### As causas mais frequentes de diferença
+### Conferir com outro sistema (sem campo automático)
 
-| Causa | Como investigar |
+Este app **não importa** valores de outros programas: você sobe os XML, vê o **resumo por CNPJ e por segmento/anexo**
+e compara com o que quiser **no olho** ou na sua planilha.
+
+### Causas comuns quando dois sistemas divergem
+
+| Causa | Onde olhar |
 |---|---|
-| Nota incluída num e excluída no outro | Compare a lista de notas nota a nota |
-| Arredondamento da alíquota efetiva | Diferença de centavos — normal |
-| ST aplicada em um e não no outro | Verifique o CSOSN dos itens |
-| Fator R com folha diferente | Compare o valor de folha informado |
-| Pró-labore esquecido na folha | Fator R menor → Anexo V indevido |
-| Transferência incluída como venda | Verifique CFOPs 5.352/6.352 |
-| CT-e de frete contado duas vezes | CT-e + frete incluso na NF-e |
-| RBT12 calculado errado | Inclui mês atual? Inclui filiais? |
+| Nota em um sistema e não no outro | Lista de notas por CNPJ (aba Resultados) |
+| Arredondamento da alíquota efetiva | Diferença de centavos — frequente |
+| ST diferente | CSOSN dos itens no XML |
+| Fator R / folha | Valores informados na aba Cliente |
+| Transferência como venda | CFOPs 5.352/6.352 |
+| Frete duplicado | CT-e + frete na NF-e |
 
-### Como usar o app para identificar a diferença
-
-1. Preencha o DAS do Domínio no campo "DAS Domínio" da empresa
-2. O app mostra a diferença e as causas mais prováveis
-3. Abra a lista de notas e compare com o Domínio nota a nota
-4. A diferença vai estar sempre em uma nota específica
-
-> **Filosofia:** quando há diferença, um dos dois está errado. 
-> Investigar essa diferença é o melhor exercício para aprender as regras.
+> Use a tabela **Detalhe por CNPJ, segmento e alíquota** para bater alíquota nominal, efetiva e DAS por recorte.
         """)
